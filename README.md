@@ -48,22 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.3.5** is the latest tvOS release.
+**Beta 3.3.6** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.5/NuvioTV-3.3.5-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.5) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.6/NuvioTV-3.3.6-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.6) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 100+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 100+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.3.5
+### New in Beta 3.3.6
 
-- **Full MDBList Integration:** QR-code device authentication, custom user lists, watchlists, ratings sync, and playback progress scrobbling.
-- **Custom Backend & Server Discovery:** Connect to self-hosted or remote Nuvio servers with automatic local network discovery.
-- **Native P2P & Torrent Streaming:** Stream torrents and magnet links directly on Apple TV with live seed, peer, and download speed indicators.
-- **Smart Buffering Spinner Policy:** Network fluctuations over buffered media no longer pop up buffering spinners over active playback.
-- **Search & Focus Refinements:** Streamlined focus transitions across native search keyboard, category filters, and results grid.
+- **Binge-Watching Stream Auto-Select:** Automatically matches and selects the stream from the identical release group (e.g. *Framestor*, *NTb*, *FLUX*) when auto-playing next episodes.
+- **Live Scrubber Thumbnail Previews:** Hover thumbnail bubble renders live video frame previews during remote scrub bar navigation.
+- **Player Controls & Remote Gestures Overhaul:** Siri Remote clickpad center tap play/pause toggle, jump seeking, chapter skipping, and quick-access side panels.
+- **Home Catalog & Collection Folder Performance:** Butter-smooth 60fps lazy row scrolling and reliable deferred focus restoration on collection folders.
+- **Native Search & Dictation Polish:** Refined native tvOS keyboard host with active Siri voice dictation support.
 
 ### Built-in Player
 
