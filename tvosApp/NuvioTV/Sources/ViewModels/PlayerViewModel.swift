@@ -2,6 +2,13 @@ import Foundation
 import Combine
 import SwiftUI
 
+@MainActor
+protocol ScrubThumbnailProviding: AnyObject {
+    var supportsScrubThumbnails: Bool { get }
+    func cachedScrubThumbnail(atSeconds seconds: Double, duration: Double) async -> CGImage?
+    func scrubThumbnail(atSeconds seconds: Double, maxWidth: Int, precise: Bool) async -> CGImage?
+}
+
 struct LiveStreamFailoverPolicy {
     struct Decision: Equatable {
         let retryCurrent: Bool
@@ -73,8 +80,15 @@ class PlayerViewModel: ObservableObject {
     @Published var isTimelineFocused: Bool = false
     /// Infuse-style scrub mode (touchpad drag / D-pad jump / wheel fine-tune).
     @Published private(set) var isScrubbing = false
+    /// Cache-backed Aether still for the current scrub target. Nil means the
+    /// time-only HUD remains visible while a still is unavailable.
+    @Published private(set) var scrubThumbnail: CGImage?
     /// Accumulated D-pad skip preview (seconds). Zero when idle.
     @Published var pendingSeekDelta: Double = 0
+    /// True while holding down D-pad Left/Right for continuous fast-seeking with live preview.
+    @Published var isHoldingSeek: Bool = false
+    /// Speed multiplier badge (1x, 2x, 3x, 4x) active during hold-to-seek.
+    @Published var seekSpeedMultiplier: Int? = nil
     /// Light-tap peek timeline (no full controls).
     @Published private(set) var peekVisible = false
     /// True while the finger is at the trackpad edge for wheel fine-tune.
@@ -217,6 +231,7 @@ class PlayerViewModel: ObservableObject {
     private var activeStreamURL: String?
     private var activeHTTPHeaders: [String: String] = [:]
     private var activePlaybackOrigin: PlaybackOrigin = .main
+    private(set) var activeBingeGroup: String?
     private var activeAddonName: String?
     private var activeProviderName: String?
     private var activeFilename: String?
@@ -279,9 +294,10 @@ class PlayerViewModel: ObservableObject {
     private var didRefreshIntroDBForKnownDuration = false
     private static let skipSegmentAutoHideSeconds = 5
     private var seekRepeatTimer: Timer?
-    /// Hold-to-seek tick rate — faster than a casual tap cadence so a held
-    /// direction ramps at least as quickly as rapid tapping.
-    private static let seekRepeatInterval: TimeInterval = 0.11
+    private var seekHoldStartDate: Date?
+    private var seekHoldDirection: Double = 1.0
+    /// Hold-to-seek tick rate (~10Hz) for smooth, responsive trick play advance.
+    private static let seekRepeatInterval: TimeInterval = 0.10
 
     // MARK: Scrub / seek accumulation
 
@@ -290,6 +306,18 @@ class PlayerViewModel: ObservableObject {
     private var scrubValue: Double?
     private var lastScrubPublish = Date.distantPast
     private var scrubTimeoutTask: Task<Void, Never>?
+    private let suppliedScrubThumbnailProvider: (any ScrubThumbnailProviding)?
+    private var scrubThumbnailProvider: (any ScrubThumbnailProviding)? {
+        suppliedScrubThumbnailProvider ?? aetherController
+    }
+    private var scrubThumbnailTask: Task<Void, Never>?
+    private var scrubThumbnailTaskInteractionToken: UInt64?
+    private var pendingScrubThumbnailSeconds: Double?
+    private var scrubThumbnailGeneration: UInt64 = 0
+    private var scrubThumbnailInteractionToken: UInt64 = 0
+    private var scrubThumbnailTargetSeconds: Double?
+    private var lastScrubTargetSeconds: Double?
+    private var speculativePrefetchTask: Task<Void, Never>?
     private var scrubLastDx: CGFloat = 0
     private var suppressMoveUntil = Date.distantPast
     var moveSuppressed: Bool { Date() < suppressMoveUntil }
@@ -314,6 +342,8 @@ class PlayerViewModel: ObservableObject {
     private var expectedDurationSeconds: Double?
     private let trailerResolver = YouTubeTrailerResolver.shared
     private var trailerResolveTask: Task<Void, Never>?
+    private var trickplayResolveTask: Task<Void, Never>?
+    private(set) var activeTrickplayURL: URL?
     @Published private(set) var didDetectReplacementStream = false
     private var replacementStreamHits = 0
     private static let replacementConfirmTicks = 1   // Immediate detection to avoid showing expired slate frame
@@ -358,7 +388,11 @@ class PlayerViewModel: ObservableObject {
     /// A source that hasn't started within this long is treated as dead.
     private let loadTimeoutSeconds: UInt64 = 30
 
-    init(sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil) {
+    init(
+        sessionCoordinator suppliedCoordinator: PlaybackSessionCoordinator? = nil,
+        scrubThumbnailProvider: (any ScrubThumbnailProviding)? = nil
+    ) {
+        suppliedScrubThumbnailProvider = scrubThumbnailProvider
         // A PiP restore creates this view model after the app has already
         // dismissed the original PlayerView. Adopt the retained coordinator
         // before SwiftUI mounts a surface so it never binds a fresh, empty
@@ -429,6 +463,7 @@ class PlayerViewModel: ObservableObject {
             self?.hdrModeToast = message
             self?.showPlayerToast(message)
             self?.activeEngineKind = self?.sessionCoordinator.activeBackend ?? .mpv
+            self?.resetScrubThumbnailState()
             if self?.isPlaybackDebugEnabled == true {
                 self?.playbackDebugHUDBackend = nil
                 self?.isPlaybackDebugHUDVisible = true
@@ -456,7 +491,9 @@ class PlayerViewModel: ObservableObject {
         let poll = pollTimer
         let hide = controlsHideTimer
         trailerResolveTask?.cancel()
+        trickplayResolveTask?.cancel()
         subtitleFetchTask?.cancel()
+        scrubThumbnailTask?.cancel()
         Task { @MainActor in
             poll?.invalidate()
             hide?.invalidate()
@@ -474,17 +511,25 @@ class PlayerViewModel: ObservableObject {
         externalSubtitles: [NuvioSubtitle] = [],
         resumeFrom: Double?,
         playbackOrigin: PlaybackOrigin = .main,
+        bingeGroup: String? = nil,
         addonName: String? = nil,
         provider: String? = nil,
         filename: String? = nil,
-        videoSize: Int64? = nil
+        videoSize: Int64? = nil,
+        trickplayURL: URL? = nil
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
+        // Keep this session-level flag authoritative for tracking decisions.
+        // The trailer uses the movie's metadata so checking only the current
+        // subtitle can accidentally send the movie identity to Trakt.
+        isTrailerPlaybackSession = isTrailerPlayback
         activePlaybackOrigin = playbackOrigin
+        activeBingeGroup = bingeGroup
         activeAddonName = addonName
         activeProviderName = provider
         activeFilename = filename
         activeVideoSize = videoSize
+        activeTrickplayURL = trickplayURL
         if !hasLoaded { sessionTrackSelection = nil }
 
         // Adopt active Picture in Picture session if already playing this content
@@ -525,7 +570,6 @@ class PlayerViewModel: ObservableObject {
         )
         guard !hasLoaded else { return }
         hasLoaded = true
-        isTrailerPlaybackSession = isTrailerPlayback
 
         if isTrailerPlayback, let youtubeId = Self.youtubeVideoId(from: url) {
             let title = meta.name
@@ -627,6 +671,16 @@ class PlayerViewModel: ObservableObject {
     ) {
         let frameRateMode = ProfileSettings.current.string(forKey: SettingsKey.frameRateMatching) ?? "Always"
         let matchContent = frameRateMode.caseInsensitiveCompare("Off") != .orderedSame
+        let contentId = activeMeta?.imdbId
+            ?? (activeMeta?.id.hasPrefix("tt") == true ? activeMeta?.id : nil)
+            ?? activeMeta?.id
+        let canonicalKey = TrickplayDiskCache.canonicalKey(
+            contentId: contentId,
+            season: activeEpisodeNumbers?.season,
+            episode: activeEpisodeNumbers?.episode,
+            duration: expectedDurationSeconds,
+            fallbackURL: url.absoluteString
+        )
         let request = PlaybackLoadRequest(
             videoURL: url,
             audioURL: nil,
@@ -649,12 +703,35 @@ class PlayerViewModel: ObservableObject {
             audioGainDB: Double(audioAmplificationDb),
             streamName: streamName,
             streamDescription: streamDescription,
-            filename: filename
+            filename: filename,
+            canonicalMediaKey: canonicalKey,
+            trickplayURL: activeTrickplayURL
         )
         sessionCoordinator.load(
             request,
             requiresMPVAudioControls: audioAmplificationDb > 0
         )
+
+        // Launch asynchronous storyboard resolver (direct URL or community trickplay)
+        trickplayResolveTask?.cancel()
+        let directTPURL = activeTrickplayURL
+        let sNum = activeEpisodeNumbers?.season
+        let eNum = activeEpisodeNumbers?.episode
+        let expDur = expectedDurationSeconds
+        trickplayResolveTask = Task { [weak self, activeGen = self.sessionCoordinator.loadGeneration] in
+            let provider = await TrickplayResolver.shared.resolve(
+                contentId: contentId,
+                season: sNum,
+                episode: eNum,
+                duration: expDur,
+                directTrickplayURL: directTPURL
+            )
+            guard let self, let provider, !Task.isCancelled else { return }
+            await MainActor.run {
+                guard self.sessionCoordinator.loadGeneration == activeGen else { return }
+                self.sessionCoordinator.setExternalTrickplayProvider(provider)
+            }
+        }
         // The coordinator owns initial seek and subtitle registration on both
         // backends; later progressive subtitle results still flow through the
         // incremental path below.
@@ -718,6 +795,7 @@ class PlayerViewModel: ObservableObject {
         preserveSessionPreferences: Bool = false
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
+        isTrailerPlaybackSession = isTrailerPlayback
         isPlaybackDebugEnabled = ProfileSettings.current.bool(forKey: SettingsKey.playbackDebug)
         if isPlaybackDebugEnabled {
             var info = PlaybackDebugInfo(
@@ -1245,6 +1323,9 @@ class PlayerViewModel: ObservableObject {
         self.activeProviderName = prepared.provider
         self.activeFilename = prepared.filename
         self.activeVideoSize = prepared.videoSize
+        if let bg = prepared.bingeGroup, !bg.isEmpty {
+            self.activeBingeGroup = bg
+        }
         if let episode {
             currentEpisodeVideo = episode
             nextEpisode = Self.nextEpisode(after: episode, in: seriesEpisodes)
@@ -1713,6 +1794,32 @@ class PlayerViewModel: ObservableObject {
             if clock.buffered != bufferedSeconds { clock.buffered = bufferedSeconds }
         }
 
+        // PlayerControls can focus the timeline before Aether has finished
+        // selecting its native/software route. Prewarm only the software
+        // extractor here; focused idle time must not publish a current-frame
+        // thumbnail or create a visible preview card.
+        if isTimelineFocused,
+           pendingSeekDelta == 0,
+           isSeekPreviewEnabled,
+           activeEngineKind == .aether,
+           aetherController?.supportsScrubThumbnails == true {
+            aetherController?.prepareScrubThumbnailExtractor()
+        }
+
+        if !isSeekPreviewEnabled {
+            aetherController?.suspendCoarseThumbnailWork()
+        } else if activeEngineKind == .aether,
+           !isScrubbing,
+           pendingSeekDelta == 0,
+           (status == .playing || status == .paused),
+           !c.isPlayerLoading,
+           !c.isPlayerEnded,
+           !c.isAtEndOfFile,
+           c.hasCoherentTimeSample,
+           clock.duration >= HybridSeekThumbnailPolicy.coarseIntervalSeconds {
+            aetherController?.advanceCoarseThumbnailIfNeeded(duration: clock.duration)
+        }
+
         let frameSize = c.videoFrameSize
         if frameSize.width > 1, frameSize.height > 1, frameSize != videoNaturalSize {
             videoNaturalSize = frameSize
@@ -1740,7 +1847,7 @@ class PlayerViewModel: ObservableObject {
             // (expired link, decode error) also reports "ended", and that must
             // neither mark the title watched nor wipe the resume point.
             if !isLiveStream,
-               let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle,
+               let activeMeta, isTrackablePlayback,
                time.duration >= 60, time.current / time.duration >= 0.85 {
                 markWatchedIfNeeded()
                 if usesTraktProgress {
@@ -1833,7 +1940,7 @@ class PlayerViewModel: ObservableObject {
             engineStatus = .error(c.currentErrorMessage)
         } else if c.isPlayerEnded {
             engineStatus = .ended
-        } else if c.isPlayerLoading {
+        } else if c.isPlayerLoading && !c.isPlayerPlaying {
             if isLiveStream, livePlaybackHasStarted {
                 let beganAt = liveBufferingBeganAt ?? Date()
                 liveBufferingBeganAt = beganAt
@@ -1939,7 +2046,8 @@ class PlayerViewModel: ObservableObject {
         // MDBList has an explicit start transition for resuming a paused
         // session. The normal progress save path will still handle a fresh
         // playback whose timeline is not ready yet.
-        if let activeMeta,
+        if isTrackablePlayback,
+           let activeMeta,
            time.current > 0,
            time.duration > 0,
            RemoteTrackingState.isProgressSourceAuthenticated {
@@ -1956,11 +2064,12 @@ class PlayerViewModel: ObservableObject {
         scheduleControlsHide()
     }
 
-    func pause() {
+    func pause(forBackground: Bool = false) {
         engine.pausePlayback()
         status = .paused
         saveProgress(force: true, eventAction: .pause)
         cancelPauseOverlaySchedule()
+        guard !forBackground else { return }
         showPauseOverlay = false
         // Show transport first; metadata sheet fades in after a short delay
         // (trailers stay on simple controls only).
@@ -2032,6 +2141,8 @@ class PlayerViewModel: ObservableObject {
         }
         trailerResolveTask?.cancel()
         trailerResolveTask = nil
+        trickplayResolveTask?.cancel()
+        trickplayResolveTask = nil
         subtitleFetchTask?.cancel()
         subtitleFetchTask = nil
         isLoadingExternalSubtitles = false
@@ -2157,29 +2268,101 @@ class PlayerViewModel: ObservableObject {
         stopRepeatingNudge(commit: true)
     }
 
-    /// Hold-to-seek uses the same accelerating accumulation as rapid taps
-    /// (`nudgeSeek`), not fixed-size hard seeks — so holding feels at least as
-    /// fast as mashing the button.
+    /// Infuse-style hold-to-seek: auto-seeks with progressive speed stages (1x -> 2x -> 3x -> 4x)
+    /// and requests live thumbnail previews.
     private func beginRepeatingNudge(base: Double) {
         guard !isLiveStream else {
             revealControls()
             return
         }
+        guard hasStartedPlayback, !isScrubbing, !showSettingsPanel else { return }
+        hidePeek()
+
         stopRepeatingNudge(commit: false)
-        // Keep any pending delta from the initial press; continue the streak.
-        applyNudge(base, holdMode: true)
+        seekDebounceTask?.cancel()
+
+        isHoldingSeek = true
+        seekHoldStartDate = Date()
+        seekSpeedMultiplier = 1
+        seekHoldDirection = base >= 0 ? 1.0 : -1.0
+
+        if pendingSeekDelta == 0 {
+            aetherController?.suspendCoarseThumbnailWork()
+            scrubThumbnailInteractionToken &+= 1
+            scrubThumbnail = nil
+            scrubThumbnailTargetSeconds = nil
+        }
+
+        advanceHoldSeek()
+
         let timer = Timer(timeInterval: Self.seekRepeatInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.applyNudge(base, holdMode: true)
+                self?.advanceHoldSeek()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         seekRepeatTimer = timer
     }
 
+    private func advanceHoldSeek() {
+        guard isHoldingSeek, hasStartedPlayback, !isScrubbing, !showSettingsPanel else { return }
+        let now = Date()
+        let holdDuration = now.timeIntervalSince(seekHoldStartDate ?? now)
+
+        let multiplier: Int
+        let speedFactor: Double
+        if holdDuration < 1.2 {
+            multiplier = 1
+            speedFactor = 1.0
+        } else if holdDuration < 2.5 {
+            multiplier = 2
+            speedFactor = 2.5
+        } else if holdDuration < 4.5 {
+            multiplier = 3
+            speedFactor = 6.0
+        } else {
+            multiplier = 4
+            speedFactor = 15.0
+        }
+
+        if seekSpeedMultiplier != multiplier {
+            seekSpeedMultiplier = multiplier
+        }
+
+        let ratePerSecond = Double(seekStepSeconds) * speedFactor
+        let tickDelta = seekHoldDirection * (ratePerSecond * Self.seekRepeatInterval)
+        pendingSeekDelta += tickDelta
+
+        let duration = playbackDuration
+        let position = playbackPosition
+        if duration > 0 {
+            let target = min(max(position + pendingSeekDelta, 0), duration - 1)
+            pendingSeekDelta = target - position
+        }
+
+        let targetPosition = position + pendingSeekDelta
+        requestScrubThumbnail(at: targetPosition)
+
+        if showPauseOverlay {
+            dismissPauseOverlay()
+            showControls = false
+        } else if showControls {
+            scheduleControlsHide()
+            if status == .paused,
+               subtitle != PlaybackMarkers.trailerSubtitle,
+               !showSettingsPanel {
+                schedulePauseOverlay()
+            }
+        }
+    }
+
     private func stopRepeatingNudge(commit: Bool) {
+        cancelMoveSeekTracking()
         seekRepeatTimer?.invalidate()
         seekRepeatTimer = nil
+        isHoldingSeek = false
+        seekSpeedMultiplier = nil
+        seekHoldStartDate = nil
         if commit {
             // Land immediately on release instead of waiting for tap debounce.
             commitPendingSeekIfNeeded()
@@ -2226,6 +2409,209 @@ class PlayerViewModel: ObservableObject {
         guard now.timeIntervalSince(lastScrubPublish) > 0.033 else { return }
         lastScrubPublish = now
         clock.scrubTarget = value
+        requestScrubThumbnail(at: value)
+    }
+
+    var isSeekPreviewEnabled: Bool {
+        ProfileSettings.current.object(forKey: SettingsKey.seekPreviewEnabled) as? Bool ?? true
+    }
+
+    func setSeekPreviewEnabled(_ enabled: Bool) {
+        ProfileSettings.current.set(enabled, forKey: SettingsKey.seekPreviewEnabled)
+        if !enabled {
+            resetScrubThumbnailState()
+        }
+        objectWillChange.send()
+    }
+
+    func setTimelineFocused(_ focused: Bool) {
+        isTimelineFocused = focused
+        if focused {
+            guard isSeekPreviewEnabled, activeEngineKind == .aether else { return }
+            aetherController?.prepareScrubThumbnailExtractor()
+        } else if !isScrubbing, pendingSeekDelta == 0 {
+            resetScrubThumbnailState()
+        }
+    }
+
+    private func resetScrubThumbnailState() {
+        scrubThumbnailGeneration &+= 1
+        scrubThumbnailInteractionToken &+= 1
+        scrubThumbnailTask?.cancel()
+        scrubThumbnailTask = nil
+        scrubThumbnailTaskInteractionToken = nil
+        pendingScrubThumbnailSeconds = nil
+        scrubThumbnail = nil
+        scrubThumbnailTargetSeconds = nil
+        speculativePrefetchTask?.cancel()
+        speculativePrefetchTask = nil
+        lastScrubTargetSeconds = nil
+    }
+
+    private func scheduleSpeculativePrefetch(from seconds: Double, direction: Double, duration: Double) {
+        speculativePrefetchTask?.cancel()
+        guard isSeekPreviewEnabled, activeEngineKind == .aether, duration > 0 else { return }
+        let step = 15.0 * (direction >= 0 ? 1.0 : -1.0)
+        let targets = [seconds + step, seconds + step * 2]
+            .filter { $0 >= 0 && $0 <= duration }
+        guard !targets.isEmpty else { return }
+        let provider = scrubThumbnailProvider
+        speculativePrefetchTask = Task(priority: .utility) { [weak provider] in
+            for target in targets {
+                guard !Task.isCancelled else { break }
+                if await provider?.cachedScrubThumbnail(atSeconds: target, duration: duration) != nil {
+                    continue
+                }
+                _ = await provider?.scrubThumbnail(atSeconds: target, maxWidth: 360, precise: false)
+            }
+        }
+    }
+
+    /// Coalesces high-frequency scrub updates into one decode at a time while
+    /// showing fast feedback while moving, then refining the settled target.
+    func requestScrubThumbnail(at seconds: Double) {
+        guard (isScrubbing || isHoldingSeek || pendingSeekDelta != 0 || isTimelineFocused),
+              isSeekPreviewEnabled,
+              activeEngineKind == .aether,
+              scrubThumbnailProvider?.supportsScrubThumbnails == true else {
+            scrubThumbnail = nil
+            scrubThumbnailTargetSeconds = nil
+            return
+        }
+        // Keep the last still visible while the next frame is decoded. Remote
+        // input routinely advances faster than a network decoder can finish.
+        pendingScrubThumbnailSeconds = seconds
+        let lastTarget = lastScrubTargetSeconds
+        lastScrubTargetSeconds = seconds
+        if let last = lastTarget, abs(seconds - last) > 0.5 {
+            let direction = seconds >= last ? 1.0 : -1.0
+            scheduleSpeculativePrefetch(from: seconds, direction: direction, duration: playbackDuration)
+        }
+        let interactionToken = scrubThumbnailInteractionToken
+        if scrubThumbnailTaskInteractionToken != nil,
+           scrubThumbnailTaskInteractionToken != interactionToken {
+            // A prior interaction may still be finishing after its task was
+            // canceled. Replace only the worker handle; the extractor itself
+            // remains retained and reusable for this new interaction.
+            scrubThumbnailTask?.cancel()
+            scrubThumbnailTask = nil
+            scrubThumbnailTaskInteractionToken = nil
+        }
+        guard scrubThumbnailTask == nil else { return }
+        let generation = scrubThumbnailGeneration
+        scrubThumbnailTaskInteractionToken = interactionToken
+        scrubThumbnailTask = Task { @MainActor [weak self] in
+            defer {
+                // A reset may have installed a newer task after canceling this
+                // one. Only its owning generation may clear the handle.
+                if let self,
+                   self.scrubThumbnailGeneration == generation,
+                   self.scrubThumbnailTaskInteractionToken == interactionToken {
+                    self.scrubThumbnailTask = nil
+                    self.scrubThumbnailTaskInteractionToken = nil
+                }
+            }
+            var lastAttemptTarget: Double?
+            var failedAttempts = 0
+            var lastDecodeTime = Date.distantPast
+            while !Task.isCancelled {
+                guard let self,
+                      let target = self.pendingScrubThumbnailSeconds else { break }
+                self.pendingScrubThumbnailSeconds = nil
+                if lastAttemptTarget != target {
+                    failedAttempts = 0
+                    lastAttemptTarget = target
+                }
+                let cached = await self.scrubThumbnailProvider?.cachedScrubThumbnail(
+                    atSeconds: target,
+                    duration: self.playbackDuration
+                )
+                guard !Task.isCancelled,
+                      self.scrubThumbnailGeneration == generation,
+                      self.scrubThumbnailTaskInteractionToken == interactionToken,
+                      (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
+                      self.activeEngineKind == .aether,
+                      self.isSeekPreviewEnabled,
+                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+
+                if let cached {
+                    self.scrubThumbnail = cached
+                    self.scrubThumbnailTargetSeconds = target
+                }
+
+                // If newer remote input arrived while querying cache, prioritize moving to it
+                if self.pendingScrubThumbnailSeconds != nil {
+                    continue
+                }
+
+                var image = cached
+                if image == nil {
+                    // Throttle fast in-flight decodes while moving (~180ms)
+                    let elapsed = Date().timeIntervalSince(lastDecodeTime)
+                    if elapsed < 0.18 {
+                        try? await Task.sleep(nanoseconds: UInt64((0.18 - elapsed) * 1_000_000_000))
+                        guard !Task.isCancelled else { return }
+                        if self.pendingScrubThumbnailSeconds != nil {
+                            continue
+                        }
+                    }
+
+                    image = await self.scrubThumbnailProvider?.scrubThumbnail(
+                        atSeconds: target, maxWidth: 360, precise: false
+                    )
+                    lastDecodeTime = Date()
+                }
+
+                guard !Task.isCancelled,
+                      self.scrubThumbnailGeneration == generation,
+                      self.scrubThumbnailTaskInteractionToken == interactionToken,
+                      (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
+                      self.activeEngineKind == .aether,
+                      self.isSeekPreviewEnabled,
+                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+
+                // Completed fast frames provide progressive feedback
+                if let image {
+                    self.scrubThumbnail = image
+                    self.scrubThumbnailTargetSeconds = target
+                } else if abs(target - (self.scrubThumbnailTargetSeconds ?? target)) > 15 {
+                    self.scrubThumbnail = nil
+                    self.scrubThumbnailTargetSeconds = nil
+                }
+
+                if self.pendingScrubThumbnailSeconds != nil { continue }
+
+                // Give new input a chance to arrive before paying for exact decode.
+                try? await Task.sleep(nanoseconds: 160_000_000)
+                guard !Task.isCancelled else { return }
+                if self.pendingScrubThumbnailSeconds != nil { continue }
+                let refined = await self.scrubThumbnailProvider?.scrubThumbnail(
+                    atSeconds: target, maxWidth: 480, precise: true
+                )
+                guard !Task.isCancelled,
+                      self.scrubThumbnailGeneration == generation,
+                      self.scrubThumbnailTaskInteractionToken == interactionToken,
+                      (self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 || self.isTimelineFocused),
+                      self.activeEngineKind == .aether,
+                      self.isSeekPreviewEnabled,
+                      self.scrubThumbnailProvider?.supportsScrubThumbnails == true else { return }
+                if self.pendingScrubThumbnailSeconds != nil { continue }
+                if let refined {
+                    self.scrubThumbnail = refined
+                    self.scrubThumbnailTargetSeconds = target
+                } else if image == nil, failedAttempts < 2 {
+                    // A transient cache miss/yield must recover even after the
+                    // user stops moving, without requiring another remote press.
+                    failedAttempts += 1
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard !Task.isCancelled else { return }
+                    if self.pendingScrubThumbnailSeconds == nil,
+                       self.isScrubbing || self.isHoldingSeek || self.pendingSeekDelta != 0 {
+                        self.pendingScrubThumbnailSeconds = target
+                    }
+                }
+            }
+        }
     }
 
     private func restartScrubTimeout() {
@@ -2239,6 +2625,7 @@ class PlayerViewModel: ObservableObject {
 
     private func resetScrubSession() {
         scrubTimeoutTask?.cancel()
+        resetScrubThumbnailState()
         scrubValue = nil
         isScrubbing = false
         resetWheel()
@@ -2250,21 +2637,28 @@ class PlayerViewModel: ObservableObject {
     func beginScrub() {
         guard !isLiveStream, hasStartedPlayback, !showSettingsPanel else { return }
         hidePeek()
+        aetherController?.suspendCoarseThumbnailWork()
         commitPendingSeekIfNeeded()
         // Scrubbing replaces the pause sheet for the gesture.
         dismissPauseOverlay()
         showControls = false
+        scrubThumbnailInteractionToken &+= 1
+        scrubThumbnail = nil
+        scrubThumbnailTargetSeconds = nil
         let position = playbackPosition
         scrubValue = position
         clock.scrubTarget = position
         isScrubbing = true
         resetWheel()
         restartScrubTimeout()
+        requestScrubThumbnail(at: position)
     }
 
     func endScrubGesture() {
         if let target = scrubValue {
             clock.scrubTarget = target
+            // The last movement may have been inside the 33 ms publish throttle.
+            requestScrubThumbnail(at: target)
         }
     }
 
@@ -2479,38 +2873,30 @@ class PlayerViewModel: ObservableObject {
         }
     }
 
-    // MARK: D-pad accumulating seek
+    // MARK: D-pad discrete skip
 
-    /// One left/right press. Rapid presses accumulate into one seek with
-    /// acceleration, previewed by `pendingSeekDelta` / SeekHUD. Hold-to-seek
-    /// uses the same path via `beginRepeatingNudge`.
+    /// Discrete left/right press: skips a fixed increment (e.g. 10s) linearly per tap,
+    /// previewed in SeekHUD without thumbnail popup, debounced before committing.
     func nudgeSeek(_ base: Double) {
         guard !isLiveStream else {
             revealControls()
             return
         }
-        applyNudge(base, holdMode: false)
-    }
-
-    private func applyNudge(_ base: Double, holdMode: Bool) {
         guard hasStartedPlayback, !isScrubbing, !showSettingsPanel else { return }
+        // Discrete tap: do not interrupt an active hold-to-seek session
+        guard !isHoldingSeek else { return }
         hidePeek()
 
-        let now = Date()
-        // Hold ticks are ~0.11s apart; taps need a looser window.
-        let streakWindow = holdMode ? 0.25 : 0.35
-        let maxStreak = holdMode ? 28 : 12
-        let accelPerStep = holdMode ? 0.75 : 0.6
-        if let last = lastNudgeAt, now.timeIntervalSince(last) < streakWindow {
-            nudgeStreak = min(nudgeStreak + 1, maxStreak)
-        } else if !holdMode {
-            nudgeStreak = 0
+        // A zero-to-nonzero transition starts a new seek interaction.
+        if pendingSeekDelta == 0 {
+            aetherController?.suspendCoarseThumbnailWork()
+            scrubThumbnailInteractionToken &+= 1
+            scrubThumbnail = nil
+            scrubThumbnailTargetSeconds = nil
         }
-        // Hold mode: don't reset streak on a slightly late tick.
-        lastNudgeAt = now
 
-        let accel = 1.0 + Double(nudgeStreak) * accelPerStep
-        pendingSeekDelta += base * accel
+        // Linear accumulation: strictly 10s per tap, no runaway streak multiplier
+        pendingSeekDelta += base
 
         let duration = playbackDuration
         let position = playbackPosition
@@ -2518,6 +2904,10 @@ class PlayerViewModel: ObservableObject {
             let target = min(max(position + pendingSeekDelta, 0), duration - 1)
             pendingSeekDelta = target - position
         }
+
+        // Discrete skip does not show thumbnails
+        scrubThumbnail = nil
+        scrubThumbnailTargetSeconds = nil
 
         // Left/right skip always dismisses the pause metadata sheet so SeekHUD /
         // transport can take over (same idea as Android onUserInteraction).
@@ -2535,28 +2925,33 @@ class PlayerViewModel: ObservableObject {
         }
 
         seekDebounceTask?.cancel()
-        if holdMode {
-            // Commit on finger-up (`stopRepeatingNudge`), not mid-hold.
-            return
-        }
         seekDebounceTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 650_000_000)
+            try? await Task.sleep(nanoseconds: 450_000_000)
             guard !Task.isCancelled, let self else { return }
             self.commitPendingSeekIfNeeded()
         }
     }
 
     private func commitPendingSeekIfNeeded() {
+        cancelMoveSeekTracking()
         seekDebounceTask?.cancel()
         let delta = pendingSeekDelta
         pendingSeekDelta = 0
         nudgeStreak = 0
+        isHoldingSeek = false
+        seekSpeedMultiplier = nil
+        seekHoldStartDate = nil
         guard delta != 0 else { return }
         // Belt-and-braces: skip must never leave the pause sheet up.
         if showPauseOverlay {
             dismissPauseOverlay()
         }
         seek(to: playbackPosition + delta)
+        if !isScrubbing, !isTimelineFocused {
+            // A focused timeline hides the card when delta reaches zero but
+            // may retain the last successful still for the next nudge.
+            resetScrubThumbnailState()
+        }
         if !isScrubbing, !showControls {
             // After a bare-video skip, briefly flash controls so the user sees
             // the landing position, then auto-hide (or return to pause sheet).
@@ -2577,6 +2972,85 @@ class PlayerViewModel: ObservableObject {
                 scheduleControlsHide()
             }
         }
+    }
+
+    // MARK: - Autorepeat-aware Move-Command Seeking
+
+    private var lastMoveSeekDate: Date?
+    private var lastMoveSeekDirection: MoveCommandDirection?
+    private var moveSeekWatchdogTask: Task<Void, Never>?
+
+    /// Returns true if a move command in this direction constitutes an autorepeat hold
+    /// (arrived within standard tvOS autorepeat cadence: <= 0.45s after prior command in the same direction).
+    func isAutorepeatMoveHold(direction: MoveCommandDirection) -> Bool {
+        guard let lastDate = lastMoveSeekDate,
+              lastMoveSeekDirection == direction else {
+            return false
+        }
+        return Date().timeIntervalSince(lastDate) <= 0.45
+    }
+
+    /// Handles a directional move command (left / right) with intelligent cadence detection:
+    /// - Isolated tap: performs discrete linear skip (e.g. 10s).
+    /// - Held down (autorepeat ticks <= 0.45s apart): engages Infuse-style hold-to-seek (1x->2x->3x->4x + live thumbnail).
+    /// - Button release (no ticks for 0.28s): automatically commits seek.
+    func handleMoveSeek(direction: MoveCommandDirection) {
+        guard !isLiveStream else {
+            revealControls()
+            return
+        }
+        guard hasStartedPlayback, !isScrubbing, !showSettingsPanel else { return }
+
+        // If already in hold-to-seek mode:
+        if isHoldingSeek {
+            if lastMoveSeekDirection == direction {
+                extendMoveSeekWatchdog()
+                return
+            } else {
+                stopRepeatingSkip()
+            }
+        }
+
+        let now = Date()
+        let isSameDir = (lastMoveSeekDirection == direction)
+        let interval = lastMoveSeekDate.map { now.timeIntervalSince($0) } ?? 999.0
+        lastMoveSeekDate = now
+        lastMoveSeekDirection = direction
+
+        if isSameDir && interval <= 0.45 {
+            // Autorepeat hold detected!
+            if direction == .left {
+                beginRepeatingSkipBackward()
+            } else if direction == .right {
+                beginRepeatingSkipForward()
+            }
+            extendMoveSeekWatchdog()
+        } else {
+            // Discrete tap
+            let delta = direction == .left ? -Double(seekStepSeconds) : Double(seekStepSeconds)
+            nudgeSeek(delta)
+        }
+    }
+
+    private func extendMoveSeekWatchdog() {
+        moveSeekWatchdogTask?.cancel()
+        moveSeekWatchdogTask = Task { @MainActor [weak self] in
+            // tvOS autorepeat fires every ~0.08 - 0.12s. If no move command arrives
+            // within 0.28s, the remote button has been released.
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled, let self else { return }
+            if self.isHoldingSeek {
+                self.stopRepeatingSkip()
+            }
+            self.cancelMoveSeekTracking()
+        }
+    }
+
+    func cancelMoveSeekTracking() {
+        moveSeekWatchdogTask?.cancel()
+        moveSeekWatchdogTask = nil
+        lastMoveSeekDate = nil
+        lastMoveSeekDirection = nil
     }
 
     func setSpeed(_ speed: PlaybackSpeed) {
@@ -3124,6 +3598,7 @@ class PlayerViewModel: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard !self.controlsAutoHideSuspended else { return }
+                guard !self.isHoldingSeek else { return }
                 // While paused, the dedicated pause-overlay timer owns visibility
                 // (3s delay). Don't fight it by auto-hiding controls early.
                 guard self.status == .playing else { return }
@@ -3285,6 +3760,13 @@ class PlayerViewModel: ObservableObject {
                 return
             }
             self.failedStreamURLs.removeAll()
+            let group = stream.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: stream)
+            if let group, !group.isEmpty {
+                self.activeBingeGroup = group
+            }
+            if let meta = self.activeMeta {
+                BingeGroupStore.save(seriesId: meta.id, stream: stream)
+            }
             self.replaceStream(prepared: prepared, episode: nil, resumeFrom: resume)
             self.showPlayerToast("Source switched")
         }
@@ -3403,6 +3885,7 @@ class PlayerViewModel: ObservableObject {
     }
 
     private func saveProgressIfNeeded() {
+        guard isTrackablePlayback else { return }
         // Start a Trakt scrobble promptly so its remote Continue Watching feed
         // has an entry before the user leaves the player. Subsequent saves keep
         // the normal cadence (and Trakt's separate 30-second report cadence).
@@ -3436,7 +3919,7 @@ class PlayerViewModel: ObservableObject {
               progressTime.current > 0,
               progressTime.duration > 0,
               progressTime.current < progressTime.duration,
-              subtitle != PlaybackMarkers.trailerSubtitle,
+              isTrackablePlayback,
               !loadedStreamLooksLikeReplacement(),
               !didDetectReplacementStream,
               !isAwaitingStreamStart || didApplyResume,
@@ -3540,6 +4023,20 @@ class PlayerViewModel: ObservableObject {
         RemoteTrackingState.isProgressSourceAuthenticated
     }
 
+    /// Trailers use the movie's metadata for artwork and playback, but are not
+    /// playback of that movie. Keep the marker check as a compatibility
+    /// fallback while the session flag protects against subtitle changes.
+    static func shouldTrackPlayback(subtitle: String, isTrailerSession: Bool) -> Bool {
+        !isTrailerSession && subtitle != PlaybackMarkers.trailerSubtitle
+    }
+
+    private var isTrackablePlayback: Bool {
+        Self.shouldTrackPlayback(
+            subtitle: subtitle,
+            isTrailerSession: isTrailerPlaybackSession
+        )
+    }
+
     private func reportTraktProgress(
         meta: NuvioMeta,
         playbackTime: PlayerTime,
@@ -3547,6 +4044,7 @@ class PlayerViewModel: ObservableObject {
         force: Bool,
         isPeriodicHeartbeat: Bool = false
     ) {
+        guard isTrackablePlayback else { return }
         guard playbackTime.current.isFinite,
               playbackTime.duration.isFinite,
               playbackTime.current > 0,
@@ -3629,6 +4127,7 @@ class PlayerViewModel: ObservableObject {
     /// Aligns with Skip Ending / Next Episode when IntroDB has an outro so a
     /// user who leaves during credits still gets the checkmark.
     private func shouldMarkAsWatched(at playbackTime: PlayerTime) -> Bool {
+        guard isTrackablePlayback else { return false }
         guard playbackTime.duration >= 60,
               playbackTime.current > 0,
               playbackTime.current / playbackTime.duration >= 0.5 else {
@@ -3659,6 +4158,7 @@ class PlayerViewModel: ObservableObject {
     /// the title itself for movies. Skips if already marked so repeated ticks
     /// past the threshold don't rewrite the store.
     private func markWatchedIfNeeded() {
+        guard isTrackablePlayback else { return }
         guard let activeMeta else { return }
         let numbers = resolvedEpisodeNumbers
         let season = numbers?.season

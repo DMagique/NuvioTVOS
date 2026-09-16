@@ -32,10 +32,8 @@ extension PlayerView {
 
                 if viewModel.showPauseOverlay {
                     switch direction {
-                    case .left:
-                        viewModel.nudgeSeek(-Double(viewModel.seekStepSeconds))
-                    case .right:
-                        viewModel.nudgeSeek(Double(viewModel.seekStepSeconds))
+                    case .left, .right:
+                        viewModel.handleMoveSeek(direction: direction)
                     default:
                         viewModel.revealControls()
                     }
@@ -44,10 +42,8 @@ extension PlayerView {
 
                 guard !viewModel.showControls else { return }
                 switch direction {
-                case .left:
-                    viewModel.nudgeSeek(-Double(viewModel.seekStepSeconds))
-                case .right:
-                    viewModel.nudgeSeek(Double(viewModel.seekStepSeconds))
+                case .left, .right:
+                    viewModel.handleMoveSeek(direction: direction)
                 default:
                     viewModel.revealControls()
                 }

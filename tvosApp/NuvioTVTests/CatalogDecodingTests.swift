@@ -94,6 +94,49 @@ final class CatalogDecodingTests: XCTestCase {
         XCTAssertEqual(TVHomeCatalogOrder.catalogDisplayTitle("Popular", contentType: "movie", showType: false), "Popular")
     }
 
+    func testCatalogDisplayTitleWithCustomTitleAndAddonNamePrefixCleaning() {
+        // Cleaning redundant prefix
+        XCTAssertEqual(
+            TVHomeCatalogOrder.cleanCatalogTitle("AIOMetadata - Top 20 TV Shows of the Week", addonName: "AIOMetadata"),
+            "Top 20 TV Shows of the Week"
+        )
+        XCTAssertEqual(
+            TVHomeCatalogOrder.cleanCatalogTitle("[AIOMetadata] Top 20 TV Shows of the Week", addonName: "AIOMetadata"),
+            "Top 20 TV Shows of the Week"
+        )
+        XCTAssertEqual(
+            TVHomeCatalogOrder.cleanCatalogTitle("AIOMetadata: Top 20 TV Shows of the Week", addonName: "AIOMetadata"),
+            "Top 20 TV Shows of the Week"
+        )
+        XCTAssertEqual(
+            TVHomeCatalogOrder.cleanCatalogTitle("AIOMetadata • Top 20 TV Shows of the Week", addonName: "AIOMetadata"),
+            "Top 20 TV Shows of the Week"
+        )
+
+        // catalogDisplayTitle with addonName cleaning
+        XCTAssertEqual(
+            TVHomeCatalogOrder.catalogDisplayTitle(
+                "AIOMetadata - Top 20 TV Shows of the Week",
+                contentType: "series",
+                showType: false,
+                addonName: "AIOMetadata"
+            ),
+            "Top 20 TV Shows of the Week"
+        )
+
+        // customTitle override takes precedence
+        XCTAssertEqual(
+            TVHomeCatalogOrder.catalogDisplayTitle(
+                "AIOMetadata - Top 20 TV Shows of the Week",
+                contentType: "series",
+                showType: true,
+                addonName: "AIOMetadata",
+                customTitle: "My Favorite Shows"
+            ),
+            "My Favorite Shows"
+        )
+    }
+
     func testHomeCatalogSyncPayloadShowCatalogTypeDefaultsAndParses() {
         let item: [String: Any] = ["addon_id": "a", "type": "movie", "catalog_id": "c"]
         XCTAssertTrue(HomeCatalogSyncPayload(dictionary: ["items": [item], "show_catalog_type": true]).showCatalogType)
@@ -115,11 +158,12 @@ final class CatalogDecodingTests: XCTestCase {
             contentType: "movie",
             catalogID: "popular"
         )
+        // Direct collection sources are hidden regardless of explicitHomeKeys presence
         XCTAssertFalse(CatalogHomeVisibilityResolver.shouldInclude(
             addonID: "example.addon", contentType: "movie", catalogID: "popular",
             collectionSources: [source], manifestURL: manifestURL, explicitHomeKeys: []
         ))
-        XCTAssertTrue(CatalogHomeVisibilityResolver.shouldInclude(
+        XCTAssertFalse(CatalogHomeVisibilityResolver.shouldInclude(
             addonID: "example.addon", contentType: "movie", catalogID: "popular",
             collectionSources: [source], manifestURL: manifestURL,
             explicitHomeKeys: ["example.addon_movie_popular"]
@@ -164,6 +208,11 @@ final class CatalogDecodingTests: XCTestCase {
             addonID: "example.addon", contentType: "movie", catalogID: "collection",
             collectionSources: [source], manifestURL: manifestURL, explicitHomeKeys: []
         ))
+        XCTAssertFalse(CatalogHomeVisibilityResolver.shouldInclude(
+            addonID: "example.addon", contentType: "movie", catalogID: "collection",
+            collectionSources: [source], manifestURL: manifestURL,
+            explicitHomeKeys: [collectionOnlyKey, "example.addon_movie_collection"]
+        ))
     }
 
     func testCatalogHomeVisibilityResolverMatchesCompositeIdentifier() throws {
@@ -174,6 +223,19 @@ final class CatalogDecodingTests: XCTestCase {
         )
         XCTAssertFalse(CatalogHomeVisibilityResolver.shouldInclude(
             addonID: "example.addon", contentType: "movie", catalogID: "popular",
+            collectionSources: [source], manifestURL: manifestURL, explicitHomeKeys: []
+        ))
+    }
+
+    func testCatalogHomeVisibilityResolverCinemetaIdentifierMatching() throws {
+        let manifestURL = try XCTUnwrap(URL(string: "https://v3-cinemeta.strem.io/manifest.json"))
+        let source = CatalogHomeVisibilityResolver.Source(
+            addonIdentifier: "com.linvo.cinemeta",
+            contentType: "movie",
+            catalogID: "top"
+        )
+        XCTAssertFalse(CatalogHomeVisibilityResolver.shouldInclude(
+            addonID: "cinemeta", contentType: "movie", catalogID: "top",
             collectionSources: [source], manifestURL: manifestURL, explicitHomeKeys: []
         ))
     }
@@ -816,4 +878,79 @@ final class CatalogDecodingTests: XCTestCase {
         viewModel.setGenre("Action")
         XCTAssertEqual(viewModel.selectedGenre, "Action")
     }
+
+    func testCinemetaMetaDecodesPosterShapeAndMapsTileShape() throws {
+        let json = """
+        {
+            "metas": [
+                {
+                    "id": "sport:1",
+                    "name": "Sky Sports Premier League",
+                    "type": "channel",
+                    "poster": "https://example.com/poster.jpg",
+                    "posterShape": "landscape"
+                },
+                {
+                    "id": "sport:2",
+                    "name": "BT Sport",
+                    "type": "channel",
+                    "poster": "https://example.com/poster2.jpg",
+                    "poster_shape": "landscape"
+                },
+                {
+                    "id": "music:1",
+                    "name": "Album Art",
+                    "type": "music",
+                    "poster": "https://example.com/square.jpg",
+                    "posterShape": "square"
+                },
+                {
+                    "id": "movie:1",
+                    "name": "Standard Movie",
+                    "type": "movie",
+                    "poster": "https://example.com/movie.jpg"
+                }
+            ]
+        }
+        """
+
+        let page = try decoder.decode(CinemetaCatalogResponse.self, from: Data(json.utf8))
+        let metas = page.metas.map { $0.toMeta(fallbackType: "channel") }
+
+        XCTAssertEqual(metas[0].posterShape, "landscape")
+        XCTAssertEqual(metas[0].tileShape, .landscape)
+
+        XCTAssertEqual(metas[1].posterShape, "landscape")
+        XCTAssertEqual(metas[1].tileShape, .landscape)
+
+        XCTAssertEqual(metas[2].posterShape, "square")
+        XCTAssertEqual(metas[2].tileShape, .square)
+
+        XCTAssertNil(metas[3].posterShape)
+        XCTAssertEqual(metas[3].tileShape, .poster)
+    }
+
+    func testAddonManifestCatalogDecodesPosterShape() throws {
+        let json = """
+        {
+            "type": "channel",
+            "id": "live_sports",
+            "name": "Live Now - Sport",
+            "posterShape": "landscape"
+        }
+        """
+
+        let catalog = try decoder.decode(AddonManifestCatalog.self, from: Data(json.utf8))
+        XCTAssertEqual(catalog.posterShape, "landscape")
+
+        let nuvioCatalog = NuvioCatalog(
+            id: catalog.id,
+            name: catalog.name,
+            type: catalog.type,
+            addonIdentifier: "https://example.com/manifest.json",
+            posterShape: catalog.posterShape
+        )
+        XCTAssertEqual(nuvioCatalog.tileShape, .landscape)
+    }
 }
+

@@ -868,7 +868,7 @@ final class SimklSettingsViewModel: ObservableObject {
     }
 
     var isTraktTransferAvailable: Bool {
-        TraktAuthStore.state(in: store).isAuthenticated(in: store)
+        TraktAuthStore.isAuthenticated(in: store)
     }
 
     func reload() {

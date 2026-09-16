@@ -140,7 +140,7 @@ struct DetailsScreen: View {
                     onWatchlistClick: { viewModel.toggleWatchlist() },
                     onWatchedClick: { viewModel.toggleWatched() },
                     mdbListUserRating: viewModel.uiState.mdbListUserRating,
-                    showMdbListRating: MdbListRuntimeSession.isAuthenticated(),
+                    showMdbListRating: false,
                     onRateClick: { showingMdbListRating = true },
                     onShareClick: { shareContent(viewModel.uiState.meta!) },
                     onTrailerClick: { openTrailer(for: viewModel.uiState.meta!) },
@@ -391,6 +391,9 @@ struct DetailsScreen: View {
         let debrid = DebridResolver(store: ProfileSettings.current)
         let cachedOnly = (ProfileSettings.current.object(forKey: SettingsKey.cachedOnlyStreams) as? Bool) ?? false
 
+        let activeProfileId = ProfileSettings.activeProfileID
+        let preferredTags = LastStreamQualityStore.load(metaId: meta.id, profileId: activeProfileId)
+
         let candidateStream: NuvioStream?
         if smartStreamUseTopResult {
             let sortRaw = ProfileSettings.current.string(forKey: SettingsKey.streamSortOption)
@@ -407,7 +410,26 @@ struct DetailsScreen: View {
             let valid = displayed.filter {
                 !SmartPlaybackSelector.isLowQualityOrTicketStream($0) && StreamPickerListBuilder.resolution(for: $0) >= 720
             }
-            candidateStream = valid.first ?? displayed.first
+            let pool = valid.isEmpty ? displayed : valid
+            let preferBingeGroup = (ProfileSettings.current.object(forKey: SettingsKey.streamAutoPlayPreferBingeGroup) as? Bool) ?? true
+            let reuseBingeGroup = (ProfileSettings.current.object(forKey: SettingsKey.streamAutoPlayReuseBingeGroup) as? Bool) ?? true
+            if (preferBingeGroup || reuseBingeGroup), let preferredTags, preferredTags.bingeGroup != nil || preferredTags.releaseFingerprint != nil {
+                let matching = pool.first { stream in
+                    let tags = StreamQualityTags.parse(stream: stream)
+                    if let pbg = preferredTags.bingeGroup, let sbg = tags.bingeGroup,
+                       pbg.compare(sbg, options: .caseInsensitive) == .orderedSame {
+                        return true
+                    }
+                    if let pfp = preferredTags.releaseFingerprint, let sfp = tags.releaseFingerprint,
+                       pfp.compare(sfp, options: .caseInsensitive) == .orderedSame {
+                        return true
+                    }
+                    return false
+                }
+                candidateStream = matching ?? pool.first
+            } else {
+                candidateStream = pool.first
+            }
         } else {
             candidateStream = SmartPlaybackSelector.bestStream(
                 from: viewModel.uiState.streams,
@@ -415,7 +437,7 @@ struct DetailsScreen: View {
                 subtitleLanguages: subtitleLanguagePreferences,
                 shouldMatchSubtitles: smartSubtitleMatching,
                 includeDebrid: debrid.isEnabled || TorrentSettings.isEnabled(),
-                preferredTags: LastStreamQualityStore.load(metaId: meta.id),
+                preferredTags: preferredTags,
                 cachedOnly: cachedOnly
             )
         }
@@ -427,6 +449,17 @@ struct DetailsScreen: View {
                 let tags = StreamQualityTags.parse(stream: stream)
                 let res = tags.resolution > 0 ? tags.resolution : SmartPlaybackSelector.inferredResolution(for: stream)
                 let targetRes = (smartStreamQuality == "720p") ? 720 : 1080
+
+                // If a preferred binge group or release fingerprint is expected for this title,
+                // do NOT declare a non-matching stream an "ideal match" while streams are still loading.
+                if let preferredTags, preferredTags.bingeGroup != nil || preferredTags.releaseFingerprint != nil {
+                    let matchesBingeGroup = (preferredTags.bingeGroup != nil && tags.bingeGroup?.compare(preferredTags.bingeGroup!, options: .caseInsensitive) == .orderedSame)
+                    let matchesFingerprint = (preferredTags.releaseFingerprint != nil && tags.releaseFingerprint?.compare(preferredTags.releaseFingerprint!, options: .caseInsensitive) == .orderedSame)
+                    guard matchesBingeGroup || matchesFingerprint else {
+                        return false
+                    }
+                }
+
                 if debrid.isEnabled {
                     return tags.isCached && res >= targetRes
                 }
@@ -450,7 +483,9 @@ struct DetailsScreen: View {
     /// streams are resolved through the configured debrid provider first, keeping
     /// the picker's spinner up until a link comes back (or the attempt fails).
     private func playStream(_ stream: NuvioStream, meta: NuvioMeta, player: ExternalPlayer? = nil) {
-        LastStreamQualityStore.save(metaId: meta.id, stream: stream)
+        let activeProfileId = ProfileSettings.activeProfileID
+        LastStreamQualityStore.save(metaId: meta.id, stream: stream, profileId: activeProfileId)
+        BingeGroupStore.save(seriesId: meta.id, stream: stream, profileId: activeProfileId)
         PlaybackStartupBenchmark.shared.markSourcePicked(stream: stream)
         if let url = stream.directURL, !url.isEmpty {
             isStreamPickerPresented = false
@@ -473,11 +508,14 @@ struct DetailsScreen: View {
         Task {
             let debridResolver = DebridResolver(store: ProfileSettings.current)
             var resolvedURL: URL? = nil
+            var rateLimited = false
             if debridResolver.isEnabled {
                 let result = await debridResolver
                     .resolvedURL(for: stream, season: season, episode: episode)
                 if case let .success(url, _, _)? = result {
                     resolvedURL = url
+                } else if case .rateLimited? = result {
+                    rateLimited = true
                 }
             }
 
@@ -508,6 +546,9 @@ struct DetailsScreen: View {
                     isPreparingPlayback = false
                     isSmartPlaybackPending = false
                     isStreamPickerPresented = true
+                    if rateLimited {
+                        print("[DetailsScreen] Debrid provider rate limit reached (HTTP 429).")
+                    }
                 }
             }
         }
@@ -2071,6 +2112,26 @@ enum StreamPickerListBuilder {
         return streams
     }
 
+    /// Default page batch size for lazy-loading stream lists.
+    static let defaultPageSize = 20
+
+    /// Pure pagination slice helper.
+    static func paginatedSlice(
+        streams: [NuvioStream],
+        limit: Int
+    ) -> [NuvioStream] {
+        guard limit > 0 else { return [] }
+        return Array(streams.prefix(limit))
+    }
+
+    /// Check whether more streams remain beyond the currently requested limit.
+    static func hasMorePages(
+        totalCount: Int,
+        currentLimit: Int
+    ) -> Bool {
+        totalCount > currentLimit
+    }
+
     static func playableStreams(
         streams: [NuvioStream],
         groups: [AddonStreamGroup],
@@ -2945,6 +3006,7 @@ private struct TvDetailsBackdrop: View {
 
 private struct TvDetailsLogo: View {
     let meta: NuvioMeta
+    var alignment: Alignment = .leading
 
     var body: some View {
         Group {
@@ -2963,7 +3025,7 @@ private struct TvDetailsLogo: View {
                 titleFallback
             }
         }
-        .frame(width: 560, height: 162, alignment: .leading)
+        .frame(width: 560, height: 162, alignment: alignment)
     }
 
     private var titleFallback: some View {
@@ -2973,7 +3035,8 @@ private struct TvDetailsLogo: View {
             .lineLimit(2)
             .minimumScaleFactor(0.74)
             .shadow(color: .black.opacity(0.65), radius: 14, y: 6)
-            .frame(maxWidth: 560, alignment: .leading)
+            .multilineTextAlignment(alignment == .center ? .center : .leading)
+            .frame(maxWidth: 560, alignment: alignment)
     }
 }
 
@@ -4825,10 +4888,13 @@ struct TvDetailsGlassBackground<S: InsettableShape>: ViewModifier {
             }
         } else if #available(tvOS 26.0, *) {
             content
-                .background(Color.white.opacity(0.10), in: shape)
+                .background(Color.black.opacity(0.20), in: shape)
+                .background(Color.white.opacity(0.08), in: shape)
                 .glassEffect(.regular, in: shape)
         } else {
-            content.background(.ultraThinMaterial, in: shape)
+            content
+                .background(.ultraThinMaterial, in: shape)
+                .background(Color.black.opacity(0.30), in: shape)
         }
     }
 }
@@ -4879,6 +4945,8 @@ private struct TvStreamPickerOverlay: View {
     /// never when focus moves between cards.
     @State private var displayedStreams: [NuvioStream] = []
     @State private var displayedStreamsCacheKey: StreamPickerListCacheKey?
+    /// Number of streams currently materialized in the picker list for lazy loading.
+    @State private var visibleStreamLimit: Int = StreamPickerListBuilder.defaultPageSize
     /// Badge matching is regex-heavy, so derive it with the stream-list cache
     /// instead of from SwiftUI card initializers during focus updates.
     @State private var streamCardPresentations: [String: TvStreamCardPresentation] = [:]
@@ -4913,7 +4981,8 @@ private struct TvStreamPickerOverlay: View {
     private var streamCardPresentationCacheKey: TvStreamCardPresentationCacheKey {
         TvStreamCardPresentationCacheKey(
             listKey: displayedStreamsCacheKey,
-            badgeSettingsRevision: streamBadgeSettingsRevision
+            badgeSettingsRevision: streamBadgeSettingsRevision,
+            visibleLimit: visibleStreamLimit
         )
     }
 
@@ -4929,18 +4998,22 @@ private struct TvStreamPickerOverlay: View {
             let panelWidth = min(canvasWidth * 0.56, 1_080)
             let panelHeight = min(max(canvasHeight - 300, 440), 720)
             let panelStackHeight = panelHeight + 118
+            let panelCenterY = canvasHeight / 2
+            let panelTopY = panelCenterY - panelStackHeight / 2
+            let streamBoxCenterY = panelTopY + 118 + panelHeight / 2
 
             ZStack {
                 TvDetailsBackdrop(meta: meta)
+                Color.black.opacity(0.55).ignoresSafeArea()
 
                 // The summary and picker are independent layers. Their former
                 // shared HStack let the summary's async logo/intrinsic height
                 // move the picker during tvOS focus layout.
                 leftSummary
-                    .frame(width: summaryWidth, alignment: .leading)
+                    .frame(width: summaryWidth, alignment: .center)
                     .position(
                         x: 96 + summaryWidth / 2,
-                        y: canvasHeight * 0.425
+                        y: streamBoxCenterY
                     )
 
                 VStack(alignment: .leading, spacing: 28) {
@@ -4958,7 +5031,7 @@ private struct TvStreamPickerOverlay: View {
                 .frame(width: panelWidth, height: panelStackHeight, alignment: .top)
                 .position(
                     x: canvasWidth - 64 - panelWidth / 2,
-                    y: 168 + panelStackHeight / 2
+                    y: panelCenterY
                 )
             }
             // The picker mounts before discovery finishes, so this seed usually
@@ -5012,6 +5085,22 @@ private struct TvStreamPickerOverlay: View {
         displayedStreams
     }
 
+    /// Paginated active slice of streams for instantaneous initial display and smooth scrolling.
+    private var activeVisibleStreams: [NuvioStream] {
+        StreamPickerListBuilder.paginatedSlice(
+            streams: activeDisplayedStreams,
+            limit: visibleStreamLimit
+        )
+    }
+
+    private func loadMoreStreams() {
+        guard visibleStreamLimit < activeDisplayedStreams.count else { return }
+        visibleStreamLimit = min(
+            visibleStreamLimit + StreamPickerListBuilder.defaultPageSize,
+            activeDisplayedStreams.count
+        )
+    }
+
     /// Rebuilds the cached list only when derivation inputs actually change.
     private func refreshDisplayedStreamsIfNeeded() {
         let key = listCacheKey
@@ -5026,12 +5115,14 @@ private struct TvStreamPickerOverlay: View {
         )
         displayedStreams = refreshedStreams
         displayedStreamsCacheKey = key
+        visibleStreamLimit = StreamPickerListBuilder.defaultPageSize
     }
 
     @MainActor
     private func rebuildStreamCardPresentations() async {
         let cacheKey = streamCardPresentationCacheKey
-        let streamsToBuild = activeDisplayedStreams
+        let maxNeeded = min(visibleStreamLimit + StreamPickerListBuilder.defaultPageSize, activeDisplayedStreams.count)
+        let streamsToBuild = Array(activeDisplayedStreams.prefix(maxNeeded))
         let settings = streamBadgeSettings
         let missingStreams = streamsToBuild.filter {
             streamCardPresentations[$0.id] == nil
@@ -5058,14 +5149,15 @@ private struct TvStreamPickerOverlay: View {
     }
 
     private var leftSummary: some View {
-        VStack(alignment: .leading, spacing: 34) {
-            TvDetailsLogo(meta: meta)
+        VStack(alignment: .center, spacing: 30) {
+            TvDetailsLogo(meta: meta, alignment: .center)
 
             if let episode {
-                VStack(spacing: 14) {
+                VStack(spacing: 12) {
                     Text(L10n.format("details_season_episode", fallback: "Season %1$d · Episode %2$d", episode.season, episode.episode))
                         .font(.system(size: 36, weight: .semibold))
                         .foregroundColor(.white)
+                        .multilineTextAlignment(.center)
 
                     Text(episode.title)
                         .font(.system(size: 30, weight: .regular))
@@ -5155,8 +5247,10 @@ private struct TvStreamPickerOverlay: View {
 
     private var streamPanel: some View {
         // Resolve once per panel body — focus changes hit the cache path only.
-        let streamsToShow = activeDisplayedStreams
+        let streamsToShow = activeVisibleStreams
+        let totalCount = activeDisplayedStreams.count
         let badgeSettings = streamBadgeSettings
+        let hasMore = totalCount > streamsToShow.count
         return ZStack {
             if isLoading && streamsToShow.isEmpty && selectedGroupError == nil {
                 VStack(spacing: 24) {
@@ -5211,9 +5305,31 @@ private struct TvStreamPickerOverlay: View {
                                 action: { onSelect(stream, nil) },
                                 onSelectPlayer: { player in onSelect(stream, player) }
                             )
+                            .onAppear {
+                                if let index = streamsToShow.firstIndex(where: { $0.id == stream.id }),
+                                   index >= streamsToShow.count - 4,
+                                   hasMore {
+                                    loadMoreStreams()
+                                }
+                            }
                         }
 
-                        if isLoading {
+                        if hasMore {
+                            HStack(spacing: 16) {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                                    .scaleEffect(1.0)
+                                Text(L10n.format("details_showing_sources_format", fallback: "Showing %1$d of %2$d sources…", streamsToShow.count, totalCount))
+                                    .font(.system(size: 24, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.60))
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 12)
+                            .padding(.bottom, 20)
+                            .onAppear {
+                                loadMoreStreams()
+                            }
+                        } else if isLoading {
                             HStack(spacing: 18) {
                                 ProgressView()
                                     .progressViewStyle(CircularProgressViewStyle(tint: .white))
@@ -5394,7 +5510,7 @@ private struct TvStreamFilterButton: View {
                 .font(.system(size: 26, weight: .medium))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-                .foregroundColor(isSelected || isFocused ? .black : .white.opacity(0.62))
+                .foregroundColor(isSelected || isFocused ? .black : .white.opacity(0.85))
                 .padding(.horizontal, 26)
                 .frame(height: 58)
                 .modifier(TvDetailsGlassBackground(filled: isSelected || isFocused, shape: Capsule()))
@@ -5411,6 +5527,7 @@ private struct TvStreamFilterButton: View {
 private struct TvStreamCardPresentationCacheKey: Equatable {
     let listKey: StreamPickerListCacheKey?
     let badgeSettingsRevision: UInt64
+    let visibleLimit: Int
 }
 
 private struct TvStreamCardPresentation {

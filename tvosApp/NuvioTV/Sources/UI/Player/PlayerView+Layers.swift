@@ -176,21 +176,20 @@ extension PlayerView {
     @ViewBuilder
     var remoteSeekPressCatcherLayer: some View {
         RemoteSeekPressCatcher(
-            // Hold left/right continuous seek when controls are hidden, or
-            // when the timeline is focused. (Arrow holds are unreliable while
-            // a focused progress bar owns the focus engine — hide chrome to
-            // hold-seek.)
+            // Hold left/right continuous seek is active during video playback,
+            // whether controls are shown or hidden and regardless of button focus.
             isActive: !isWakingFromBackground
-                && viewModel.playbackStartupError == nil && !viewModel.showSettingsPanel
+                && viewModel.playbackStartupError == nil
+                && !viewModel.showSettingsPanel
                 && viewModel.sidePanel == nil
                 && !viewModel.isScrubbing
-                && !viewModel.postPlayState.isVisible
-                && (!viewModel.showControls || viewModel.isTimelineFocused),
+                && !viewModel.postPlayState.isVisible,
             onBeginBackward: { viewModel.beginRepeatingSkipBackward() },
             onBeginForward: { viewModel.beginRepeatingSkipForward() },
             onEnd: { viewModel.stopRepeatingSkip() }
         )
-        .frame(width: 1, height: 1)
+        .allowsHitTesting(false)
+        .frame(width: 0, height: 0)
         .accessibilityHidden(true)
     }
 
@@ -228,8 +227,8 @@ extension PlayerView {
         // controls hide raced the timeline losing focusability, leaving focus in
         // a void); non-focusable while the controls are up so focus hands cleanly
         // to the timeline, focusable again the instant they hide. `up`/`down`
-        // reveal via the PlayerView `onMoveCommand`; the select click reveals via
-        // the tap gesture.
+        // reveal via the PlayerView `onMoveCommand`; the select click toggles
+        // play/pause via the tap gesture.
         Color.clear
             .ignoresSafeArea()
             .contentShape(Rectangle())
@@ -252,7 +251,7 @@ extension PlayerView {
                 } else if viewModel.peekVisible {
                     viewModel.beginScrub()
                 } else {
-                    viewModel.revealControls()
+                    viewModel.togglePlayPause()
                 }
             }
             .accessibilityHidden(true)
@@ -276,7 +275,10 @@ extension PlayerView {
                 clock: viewModel.clock,
                 title: viewModel.title,
                 episodeLine: viewModel.subtitle.isEmpty ? nil : viewModel.subtitle,
-                wheelEngaged: viewModel.wheelEngaged
+                thumbnail: viewModel.isSeekPreviewEnabled ? viewModel.scrubThumbnail : nil,
+                naturalSize: viewModel.videoNaturalSize,
+                wheelEngaged: viewModel.wheelEngaged,
+                showThumbnailCard: viewModel.isSeekPreviewEnabled
             )
             .transition(.opacity)
             .zIndex(4)
@@ -287,7 +289,13 @@ extension PlayerView {
     var seekPreviewLayer: some View {
         // Accumulated D-pad skip preview over bare video.
         if viewModel.pendingSeekDelta != 0, !viewModel.showControls, !viewModel.isScrubbing {
-            SeekHUD(clock: viewModel.clock, delta: viewModel.pendingSeekDelta)
+            SeekHUD(
+                clock: viewModel.clock,
+                delta: viewModel.pendingSeekDelta,
+                thumbnail: (viewModel.isHoldingSeek && viewModel.isSeekPreviewEnabled) ? viewModel.scrubThumbnail : nil,
+                naturalSize: viewModel.videoNaturalSize,
+                speedMultiplier: viewModel.seekSpeedMultiplier
+            )
                 .transition(.opacity)
                 .zIndex(4)
         }
@@ -326,9 +334,22 @@ extension PlayerView {
             .buttonStyle(PosterCardButtonStyle())
             .focusEffectDisabledIfAvailable()
             .focused($skipSegmentFocused)
+            .onMoveCommand { direction in
+                guard !isWakingFromBackground else { return }
+                switch direction {
+                case .down:
+                    skipSegmentFocused = false
+                    requestedControlFocus = .timeline
+                case .right:
+                    skipSegmentFocused = false
+                    requestedControlFocus = .pip
+                default:
+                    break
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             .padding(.leading, 60)
-            .padding(.bottom, viewModel.showControls ? 200 : 54)
+            .padding(.bottom, viewModel.showControls ? 120 : 54)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(3)
         }
@@ -349,6 +370,21 @@ extension PlayerView {
                 .buttonStyle(PosterCardButtonStyle())
                 .focusEffectDisabledIfAvailable()
                 .focused($nextEpisodeFocused)
+                .onMoveCommand { direction in
+                    guard !isWakingFromBackground else { return }
+                    switch direction {
+                    case .down:
+                        nextEpisodeFocused = false
+                        requestedControlFocus = .settings
+                    case .left:
+                        if viewModel.showSkipSegmentCard {
+                            nextEpisodeFocused = false
+                            focusSkipSegment()
+                        }
+                    default:
+                        break
+                    }
+                }
                 if autoPlayNextEnabled && !viewModel.isAutoPlayCancelled && !viewModel.isAdvancingEpisode {
                     Button(action: { viewModel.cancelAutoPlay() }) {
                         Text(L10n.string("player_cancel_autoplay", fallback: "Cancel Auto-Play"))
@@ -359,11 +395,24 @@ extension PlayerView {
                     }
                     .buttonStyle(.plain)
                     .focused($cancelAutoPlayFocused)
+                    .onMoveCommand { direction in
+                        guard !isWakingFromBackground else { return }
+                        switch direction {
+                        case .up:
+                            cancelAutoPlayFocused = false
+                            nextEpisodeFocused = true
+                        case .down:
+                            cancelAutoPlayFocused = false
+                            requestedControlFocus = .settings
+                        default:
+                            break
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
             .padding(.trailing, 60)
-            .padding(.bottom, viewModel.showControls ? 200 : 54)
+            .padding(.bottom, viewModel.showControls ? 208 : 54)
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(3)
         }
@@ -381,6 +430,7 @@ extension PlayerView {
             viewModel: viewModel,
             isSkipSegmentFocused: skipSegmentFocused,
             isNextEpisodeFocused: nextEpisodeFocused || cancelAutoPlayFocused,
+            requestedFocus: $requestedControlFocus,
             onFocusSkipSegment: { focusSkipSegment() },
             onFocusNextEpisode: { focusNextEpisode() }
         )

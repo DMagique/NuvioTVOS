@@ -78,6 +78,7 @@ enum MdbListLibraryService {
         tokenStorage: MdbListTokenStorage = MdbListKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store) else { return false }
         guard let ids = ids(for: meta) else { return false }
         let bucket = meta.isSeries ? "shows" : "movies"
         let body: [String: Any] = [bucket: [["ids": ids]]]
@@ -96,7 +97,7 @@ enum MdbListLibraryService {
                 method: .post,
                 body: data
             )
-            guard (200..<300).contains(response.statusCode) else { return false }
+            guard (200..<300).contains(response.statusCode), ProfileSettings.isActiveStore(store) else { return false }
             NotificationCenter.default.post(
                 name: mutationNotification,
                 object: MdbListLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)

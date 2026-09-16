@@ -62,6 +62,13 @@ enum PlaybackBackendPolicy {
         let statusMessage: String?
     }
 
+    static func isRemoteHTTP(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString), let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "https" || scheme == "http"
+    }
+
     static func resolve(_ input: Input) -> Result {
         // Hard capability exceptions always take MPV.
         if let audio = input.separateAudioURL, !audio.isEmpty {
@@ -73,6 +80,14 @@ enum PlaybackBackendPolicy {
             )
         }
         if input.requiresMPVAudioControls {
+            if isRemoteHTTP(input.urlString) && !PlaybackEngineCapabilities.mpv.supportsDirectHTTPS {
+                return Result(
+                    backend: .aether,
+                    allowAutomaticFallback: false,
+                    reason: "Audio amplification requires MPVKit, but remote HTTPS streams use AetherEngine",
+                    statusMessage: nil
+                )
+            }
             return Result(
                 backend: .mpv,
                 allowAutomaticFallback: false,
@@ -82,6 +97,14 @@ enum PlaybackBackendPolicy {
         }
         // Authored ASS Scale is not yet rendered by Nuvio's host overlay.
         if input.assMode == .scale {
+            if isRemoteHTTP(input.urlString) && !PlaybackEngineCapabilities.mpv.supportsDirectHTTPS {
+                return Result(
+                    backend: .aether,
+                    allowAutomaticFallback: false,
+                    reason: "ASS Scale uses MPV, but remote HTTPS streams use AetherEngine",
+                    statusMessage: nil
+                )
+            }
             return Result(
                 backend: .mpv,
                 allowAutomaticFallback: false,
@@ -92,6 +115,14 @@ enum PlaybackBackendPolicy {
 
         switch input.engineSetting {
         case .mpv:
+            if isRemoteHTTP(input.urlString) && !PlaybackEngineCapabilities.mpv.supportsDirectHTTPS {
+                return Result(
+                    backend: .aether,
+                    allowAutomaticFallback: false,
+                    reason: "MPVKit forced but remote HTTPS requires AetherEngine",
+                    statusMessage: "AetherEngine (MPVKit lacks HTTPS)"
+                )
+            }
             return Result(
                 backend: .mpv,
                 allowAutomaticFallback: false,
@@ -106,10 +137,13 @@ enum PlaybackBackendPolicy {
                 statusMessage: nil
             )
         case .auto:
+            let allowFallback = PlaybackEngineCapabilities.mpv.supportsDirectHTTPS || !isRemoteHTTP(input.urlString)
             return Result(
                 backend: .aether,
-                allowAutomaticFallback: true,
-                reason: "Auto: AetherEngine primary with MPVKit one-way fallback",
+                allowAutomaticFallback: allowFallback,
+                reason: allowFallback
+                    ? "Auto: AetherEngine primary with MPVKit one-way fallback"
+                    : "Auto: AetherEngine primary (remote HTTPS disables MPVKit fallback)",
                 statusMessage: nil
             )
         }

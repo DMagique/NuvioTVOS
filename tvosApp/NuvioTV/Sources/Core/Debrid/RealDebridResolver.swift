@@ -31,22 +31,26 @@ struct RealDebridResolver: DebridProvider {
                     Task { try? await delete("torrents/delete/\(torrentId)", key: key) }
                 }
             }
+            await pace()
 
             // 2. Read the file list and pick the wanted file.
             guard let infoBefore: TorrentInfo = try await get("torrents/info/\(torrentId)", key: key),
                   let file = selectFile(from: infoBefore.files ?? [], request: request),
                   let fileId = file.id
             else { return .stale }
+            await pace()
 
             // 3. Select it (RD returns 204/202 on success).
             try await postVoid("torrents/selectFiles/\(torrentId)", key: key,
                                form: ["files": String(fileId)])
+            await pace()
 
             // 4. Re-read info; once "downloaded" we get cached links.
             guard let infoAfter: TorrentInfo = try await get("torrents/info/\(torrentId)", key: key),
                   infoAfter.status?.lowercased() == "downloaded",
                   let link = infoAfter.links?.first(where: { !$0.isEmpty })
             else { return .stale }
+            await pace()
 
             // 5. Unrestrict the cached link into a direct URL.
             guard let unrestricted: UnrestrictResponse = try await post(
@@ -61,12 +65,20 @@ struct RealDebridResolver: DebridProvider {
                 videoSize: unrestricted.filesize ?? file.bytes
             )
         } catch let error as DebridHTTPError {
+            if error.status == 429 {
+                print("[RealDebridResolver] HTTP 429 rate limit reached from Real-Debrid API")
+                return .rateLimited
+            }
             return (error.status == 401 || error.status == 403) ? .error : .stale
         } catch is CancellationError {
             return .error
         } catch {
             return .error
         }
+    }
+
+    private func pace() async {
+        try? await Task.sleep(nanoseconds: 250_000_000)
     }
 
     private func selectFile(from files: [TorrentInfo.File], request: DebridRequest) -> TorrentInfo.File? {

@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import CoreGraphics
 import Combine
 import AetherLibavformat
 import AetherLibavcodec
@@ -95,6 +96,11 @@ final class SoftwarePlaybackHost {
     /// SW-PiP Phase C: engine-fed cue mirror + PiP gate for the renderer's frame compositor.
     func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool) {
         renderer.subtitleCompositor.update(cues: cues, enabled: enabled)
+    }
+
+    /// Captures the most recently decoded video frame directly from the presentation buffer.
+    func captureCurrentFrame(maxWidth: Int = 320) -> CGImage? {
+        renderer.captureCurrentFrame(maxWidth: maxWidth)
     }
 
     // MARK: - Internals

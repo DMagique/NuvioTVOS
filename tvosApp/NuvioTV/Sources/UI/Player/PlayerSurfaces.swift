@@ -29,106 +29,121 @@ struct AetherPlayerSurface: UIViewControllerRepresentable {
 }
 
 
-struct RemoteSeekPressCatcher: UIViewControllerRepresentable {
+struct RemoteSeekPressCatcher: UIViewRepresentable {
     let isActive: Bool
     let onBeginBackward: () -> Void
     let onBeginForward: () -> Void
     let onEnd: () -> Void
 
-    func makeUIViewController(context: Context) -> RemoteSeekPressViewController {
-        let controller = RemoteSeekPressViewController()
-        controller.onBeginBackward = onBeginBackward
-        controller.onBeginForward = onBeginForward
-        controller.onEnd = onEnd
-        controller.setActive(isActive)
-        return controller
+    func makeUIView(context: Context) -> SeekPressHostView {
+        let view = SeekPressHostView()
+        view.configure(
+            isActive: isActive,
+            onBeginBackward: onBeginBackward,
+            onBeginForward: onBeginForward,
+            onEnd: onEnd
+        )
+        return view
     }
 
-    func updateUIViewController(_ controller: RemoteSeekPressViewController, context: Context) {
-        controller.onBeginBackward = onBeginBackward
-        controller.onBeginForward = onBeginForward
-        controller.onEnd = onEnd
-        controller.setActive(isActive)
+    func updateUIView(_ uiView: SeekPressHostView, context: Context) {
+        uiView.configure(
+            isActive: isActive,
+            onBeginBackward: onBeginBackward,
+            onBeginForward: onBeginForward,
+            onEnd: onEnd
+        )
+    }
+
+    static func dismantleUIView(_ uiView: SeekPressHostView, coordinator: ()) {
+        uiView.removeRecognizers()
     }
 }
 
-// Internal rather than private: RemoteSeekPressCatcher is consumed from
-// PlayerView+Layers.swift, so neither it nor its view-controller type can be
-// file-scoped any more.
-final class RemoteSeekPressViewController: UIViewController {
+final class SeekPressHostView: UIView, UIGestureRecognizerDelegate {
     enum Direction {
         case backward
         case forward
     }
 
-    var onBeginBackward: () -> Void = {}
-    var onBeginForward: () -> Void = {}
-    var onEnd: () -> Void = {}
+    private var onBeginBackward: () -> Void = {}
+    private var onBeginForward: () -> Void = {}
+    private var onEnd: () -> Void = {}
 
     private var activeDirection: Direction?
-    private var acceptsNewHolds = false
-    private weak var gestureWindow: UIWindow?
-    private lazy var backwardHoldRecognizer = makeHoldRecognizer(
-        pressType: .leftArrow,
-        action: #selector(handleBackwardHold(_:))
-    )
-    private lazy var forwardHoldRecognizer = makeHoldRecognizer(
-        pressType: .rightArrow,
-        action: #selector(handleForwardHold(_:))
-    )
+    private var isActive = false
+    private weak var attachedWindow: UIWindow?
+    private var backwardHoldRecognizer: UILongPressGestureRecognizer?
+    private var forwardHoldRecognizer: UILongPressGestureRecognizer?
 
-    /// Window-level press recognizers receive Siri Remote holds even when a
-    /// focused SwiftUI view owns the responder chain. A sibling view controller's
-    /// `pressesBegan` is not guaranteed to receive those presses.
-    func setActive(_ active: Bool) {
-        acceptsNewHolds = active
+    func configure(
+        isActive: Bool,
+        onBeginBackward: @escaping () -> Void,
+        onBeginForward: @escaping () -> Void,
+        onEnd: @escaping () -> Void
+    ) {
+        self.isActive = isActive
+        self.onBeginBackward = onBeginBackward
+        self.onBeginForward = onBeginForward
+        self.onEnd = onEnd
         updateRecognizerState()
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        installRecognizersIfNeeded()
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        removeRecognizers()
+        guard let window else { return }
+
+        let backward = makeHoldRecognizer(
+            pressType: .leftArrow,
+            action: #selector(handleBackwardHold(_:))
+        )
+        let forward = makeHoldRecognizer(
+            pressType: .rightArrow,
+            action: #selector(handleForwardHold(_:))
+        )
+
+        window.addGestureRecognizer(backward)
+        window.addGestureRecognizer(forward)
+
+        backwardHoldRecognizer = backward
+        forwardHoldRecognizer = forward
+        attachedWindow = window
+        updateRecognizerState()
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        uninstallRecognizers()
+    func removeRecognizers() {
+        if activeDirection != nil {
+            activeDirection = nil
+            onEnd()
+        }
+        if let attachedWindow {
+            if let backwardHoldRecognizer {
+                attachedWindow.removeGestureRecognizer(backwardHoldRecognizer)
+            }
+            if let forwardHoldRecognizer {
+                attachedWindow.removeGestureRecognizer(forwardHoldRecognizer)
+            }
+        }
+        backwardHoldRecognizer = nil
+        forwardHoldRecognizer = nil
+        attachedWindow = nil
     }
 
     private func makeHoldRecognizer(pressType: UIPress.PressType, action: Selector) -> UILongPressGestureRecognizer {
         let recognizer = UILongPressGestureRecognizer(target: self, action: action)
         recognizer.allowedPressTypes = [NSNumber(value: pressType.rawValue)]
         recognizer.minimumPressDuration = 0.35
-        recognizer.cancelsTouchesInView = true
+        recognizer.cancelsTouchesInView = false
+        recognizer.delegate = self
         recognizer.isEnabled = false
         return recognizer
     }
 
-    private func installRecognizersIfNeeded() {
-        guard let window = view.window, gestureWindow !== window else { return }
-        uninstallRecognizers()
-        window.addGestureRecognizer(backwardHoldRecognizer)
-        window.addGestureRecognizer(forwardHoldRecognizer)
-        gestureWindow = window
-        updateRecognizerState()
-    }
-
-    private func uninstallRecognizers() {
-        if activeDirection != nil {
-            activeDirection = nil
-            onEnd()
-        }
-        gestureWindow?.removeGestureRecognizer(backwardHoldRecognizer)
-        gestureWindow?.removeGestureRecognizer(forwardHoldRecognizer)
-        gestureWindow = nil
-    }
-
     private func updateRecognizerState() {
-        // Once a hold starts, keep its recognizer alive through the brief focus
-        // handoff that occurs when seeking reveals the controls.
-        let enabled = acceptsNewHolds || activeDirection != nil
-        backwardHoldRecognizer.isEnabled = enabled
-        forwardHoldRecognizer.isEnabled = enabled
+        let enabled = isActive || activeDirection != nil
+        backwardHoldRecognizer?.isEnabled = enabled
+        forwardHoldRecognizer?.isEnabled = enabled
     }
 
     @objc private func handleBackwardHold(_ recognizer: UILongPressGestureRecognizer) {
@@ -142,7 +157,7 @@ final class RemoteSeekPressViewController: UIViewController {
     private func handleHold(_ recognizer: UILongPressGestureRecognizer, direction: Direction) {
         switch recognizer.state {
         case .began:
-            guard acceptsNewHolds, activeDirection == nil else { return }
+            guard isActive, activeDirection == nil else { return }
             activeDirection = direction
             switch direction {
             case .backward: onBeginBackward()
@@ -156,5 +171,18 @@ final class RemoteSeekPressViewController: UIViewController {
         default:
             break
         }
+    }
+
+    // MARK: - UIGestureRecognizerDelegate
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        true
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive press: UIPress) -> Bool {
+        isActive || activeDirection != nil
     }
 }

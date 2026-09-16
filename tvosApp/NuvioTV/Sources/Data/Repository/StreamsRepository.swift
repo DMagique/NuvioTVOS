@@ -766,7 +766,10 @@ struct StreamAddonStreamDTO: Decodable {
             videoSize: behaviorHints?.videoSize,
             bingeGroup: cleaned(behaviorHints?.bingeGroup),
             isCached: behaviorHints?.cached ?? behaviorHints?.isCached,
-            httpHeaders: behaviorHints?.proxyHeaders?.request
+            httpHeaders: behaviorHints?.proxyHeaders?.request,
+            trickplayURL: (cleaned(behaviorHints?.trickplayUrl)
+                ?? cleaned(behaviorHints?.storyboard)
+                ?? cleaned(behaviorHints?.trickplay)).flatMap(URL.init(string:))
         )
     }
 
@@ -859,6 +862,9 @@ struct StreamAddonBehaviorHints: Decodable {
     let cached: Bool?
     let isCached: Bool?
     let proxyHeaders: StreamAddonProxyHeaders?
+    let trickplay: String?
+    let trickplayUrl: String?
+    let storyboard: String?
 }
 
 /// Stremio stream add-ons can require request headers for the media host.

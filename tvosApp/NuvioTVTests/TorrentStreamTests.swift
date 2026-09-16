@@ -147,17 +147,26 @@ final class TorrentStreamTests: XCTestCase {
     }
 
     func testPieceWaiterRegistry() async {
+        final class PieceState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _hasPiece = false
+            var hasPiece: Bool {
+                get { lock.lock(); defer { lock.unlock() }; return _hasPiece }
+                set { lock.lock(); defer { lock.unlock() }; _hasPiece = newValue }
+            }
+        }
+
         let registry = PieceWaiterRegistry()
-        var hasPiece0 = false
+        let state = PieceState()
 
         let task = Task {
-            await registry.wait(0) { _ in hasPiece0 }
+            await registry.wait(0) { _ in state.hasPiece }
             return true
         }
 
         // Initially not completed
         try? await Task.sleep(nanoseconds: 20_000_000)
-        hasPiece0 = true
+        state.hasPiece = true
         registry.fulfill(0)
 
         let result = await task.value

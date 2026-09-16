@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// Netflix-style alternative to `SearchView`: results split into a text index
-/// on the left and a poster grid on the right, mirroring the tvOS Netflix
-/// search screen. Wired to the same `CatalogRepository` search use case as
+/// Netflix-style alternative to `SearchView` with poster grid results.
+/// Wired to the same `CatalogRepository` search use case as
 /// `SearchView` via `NetflixSearchViewModel`.
 ///
 /// Text entry uses the same tvOS `.searchable` host as Native search, so
@@ -19,9 +18,12 @@ private enum NetflixSearchMetrics {
     /// Match Classic Search's outer gutter so every Netflix Search surface —
     /// not only Discover — shares the same centered content column.
     static let pageInset: CGFloat = 36
-    static let posterWidth: CGFloat = 190
-    static let posterHeight: CGFloat = 285
+    static let posterWidth: CGFloat = 210
+    static let posterHeight: CGFloat = 315
     static let posterGap: CGFloat = 24
+    static let gridColumnCount = 5
+    static let gridContentWidth = posterWidth * CGFloat(gridColumnCount)
+        + posterGap * CGFloat(gridColumnCount - 1) + 24
     static let listWidth: CGFloat = 440
     static let columnGap: CGFloat = 32
 }
@@ -34,9 +36,7 @@ struct NetflixSearchView: View {
     let onContentClick: (String, String) -> Void
     var onLongPress: ((NuvioMeta) -> Void)? = nil
 
-    /// One shared focus id-space for both the text list and the poster grid,
-    /// namespaced ("list:"/"grid:") so the same result can be focused in
-    /// either column without the two bindings fighting over one id.
+    /// Separate list and poster focus IDs preserve overlay restoration in linear mode.
     @FocusState private var focusedItemID: String?
     @FocusState private var focusedTypeFilterID: String?
     @FocusState private var clearRecentFocused: Bool
@@ -79,68 +79,20 @@ struct NetflixSearchView: View {
         self.onLongPress = onLongPress
     }
 
+    @AppStorage("nuvio.keyboard.detectedLayout") private var detectedKeyboardMode: TVOSKeyboardLayoutMode = .linear
+
     var body: some View {
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
-            VStack(alignment: .leading, spacing: 0) {
-                NativeSearchKeyboardHost(
-                    text: $viewModel.searchText,
-                    prompt: L10n.string("search_placeholder", fallback: "Search movies & series"),
-                    isPresented: $searchPresented,
-                    isDisabled: overlayRestoreItemID != nil || discoverOverlayTransitionActive
-                )
+            TVOSKeyboardLayoutDetector(layoutMode: $detectedKeyboardMode)
+                .frame(width: 0, height: 0)
+                .opacity(0)
 
-                VStack(alignment: .leading, spacing: 20) {
-                    if viewModel.hasQuery {
-                        typeFilterRow
-                            .disabled(overlayRestoreItemID != nil || (searchPresented && focusedTypeFilterID == nil))
-                        resultsBody
-                    } else {
-                        if searchPresented, !viewModel.recentSearches.isEmpty {
-                            recentRow
-                                .disabled(discoverOverlayTransitionActive)
-                        }
-                        if showDiscover {
-                            DiscoverSection(
-                                onContentClick: onContentClick,
-                                onLongPress: onLongPress,
-                                onCardFocus: {
-                                    withAnimation(.easeInOut(duration: 0.22)) {
-                                        searchPresented = false
-                                    }
-                                },
-                                onFilterFocus: {
-                                    showKeyboard()
-                                },
-                                onFocusExit: {
-                                    // A recent-search chip is directly above Discover.
-                                    // If focus moved there, keep it there instead of
-                                    // stealing it back for the query field.
-                                    guard isEnabled,
-                                          !discoverOverlayTransitionActive,
-                                          focusedRecentSearchID == nil else { return }
-                                    showKeyboard()
-                                },
-                                parentTransitionActive: $discoverOverlayTransitionActive
-                            )
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        } else {
-                            centeredState {
-                                messageState(
-                                    icon: "rectangle.grid.2x2",
-                                    title: L10n.string(
-                                        "search_start_subtitle_no_discover",
-                                        fallback: "Discover is disabled. Enter at least 2 characters"
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-                .padding(.horizontal, NetflixSearchMetrics.pageInset)
-                .padding(.top, 40)
-                .ignoresSafeArea(.container, edges: .bottom)
+            if detectedKeyboardMode == .grid {
+                gridBody
+            } else {
+                linearBody
             }
         }
         .onAppear {
@@ -150,8 +102,10 @@ struct NetflixSearchView: View {
         .onChange(of: focusedItemID) { _, newValue in
             resultFocusGeneration &+= 1
             if let newValue {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    searchPresented = false
+                if detectedKeyboardMode == .linear {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        searchPresented = false
+                    }
                 }
                 lastFocusedItemID = newValue
                 shouldRestoreFocus = false
@@ -180,7 +134,6 @@ struct NetflixSearchView: View {
                 overlayRestoreGeneration &+= 1
                 overlayRestoreItemID = focusedItemID ?? lastFocusedItemID
             } else if let target = overlayRestoreItemID {
-                searchPresented = false
                 restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
             }
         }
@@ -188,6 +141,132 @@ struct NetflixSearchView: View {
             guard !isFullScreenOverlayPresented,
                   let target = overlayRestoreItemID else { return }
             restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
+        }
+    }
+
+    // MARK: - Linear Layout
+
+    private var linearBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            NativeSearchKeyboardHost(
+                text: $viewModel.searchText,
+                prompt: L10n.string("search_placeholder", fallback: "Search movies & series"),
+                isPresented: $searchPresented,
+                isDisabled: overlayRestoreItemID != nil || discoverOverlayTransitionActive,
+                topPadding: 56
+            )
+
+            VStack(alignment: .leading, spacing: 20) {
+                if viewModel.hasQuery {
+                    typeFilterRow
+                        .disabled(overlayRestoreItemID != nil || (searchPresented && focusedTypeFilterID == nil))
+                    resultsBody
+                } else {
+                    if searchPresented, !viewModel.recentSearches.isEmpty {
+                        recentRow
+                            .disabled(discoverOverlayTransitionActive)
+                    }
+                    if showDiscover {
+                        DiscoverSection(
+                            onContentClick: onContentClick,
+                            columnCount: 7,
+                            onLongPress: onLongPress,
+                            onCardFocus: {
+                                withAnimation(.easeInOut(duration: 0.22)) {
+                                    searchPresented = false
+                                }
+                            },
+                            onFilterFocus: {
+                                showKeyboard()
+                            },
+                            onFocusExit: {
+                                guard isEnabled,
+                                      !discoverOverlayTransitionActive,
+                                      focusedRecentSearchID == nil else { return }
+                                showKeyboard()
+                            },
+                            parentTransitionActive: $discoverOverlayTransitionActive
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else {
+                        centeredState {
+                            messageState(
+                                icon: "rectangle.grid.2x2",
+                                title: L10n.string(
+                                    "search_start_subtitle_no_discover",
+                                    fallback: "Discover is disabled. Enter at least 2 characters"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, NetflixSearchMetrics.pageInset)
+            .padding(.top, 16)
+            .ignoresSafeArea(.container, edges: .bottom)
+        }
+    }
+
+    // MARK: - Grid Layout
+
+    private var gridBody: some View {
+        gridNavigationBody
+            .padding(.top, 56)
+            .safeAreaPadding(.horizontal, TVLayout.rowLeading)
+    }
+
+    private var gridNavigationBody: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 20) {
+                if viewModel.hasQuery {
+                    GridSearchSuggestionChips(
+                        query: $viewModel.searchText,
+                        suggestions: gridSuggestionTitles,
+                        isDisabled: overlayRestoreItemID != nil,
+                        onSubmit: {
+                            viewModel.performSearch(query: viewModel.searchText)
+                        }
+                    )
+                    typeFilterRow
+                        .disabled(overlayRestoreItemID != nil)
+                    resultsBody
+                } else {
+                    if !viewModel.recentSearches.isEmpty {
+                        recentRow
+                            .disabled(discoverOverlayTransitionActive)
+                    }
+                    if showDiscover {
+                        DiscoverSection(
+                            onContentClick: onContentClick,
+                            isBesideKeyboard: true,
+                            onLongPress: onLongPress,
+                            parentTransitionActive: $discoverOverlayTransitionActive
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else {
+                        centeredState {
+                            messageState(
+                                icon: "rectangle.grid.2x2",
+                                title: L10n.string(
+                                    "search_start_subtitle_no_discover",
+                                    fallback: "Discover is disabled. Enter at least 2 characters"
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: NetflixSearchMetrics.gridContentWidth, alignment: .leading)
+            .padding(.trailing, NetflixSearchMetrics.pageInset)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 24)
+            .ignoresSafeArea(.container, edges: .bottom)
+            .searchable(
+                text: $viewModel.searchText,
+                prompt: L10n.string("search_placeholder", fallback: "Search movies & series")
+            )
+            .autocorrectionDisabled()
+            .toolbar(.hidden, for: .navigationBar)
         }
     }
 
@@ -268,7 +347,8 @@ struct NetflixSearchView: View {
             focusedItemID = nil
             return
         }
-        let prefix = focusedItemID?.hasPrefix("grid:") == true ? "grid:" : "list:"
+        let prefix = detectedKeyboardMode == .linear && focusedItemID?.hasPrefix("list:") == true
+            ? "list:" : "grid:"
         focusedItemID = "\(prefix)\(first.id)"
     }
 
@@ -390,6 +470,22 @@ struct NetflixSearchView: View {
         return viewModel.results.filter { !ContentReleasePolicy.isUnreleased($0) }
     }
 
+    private var gridSuggestionTitles: [String] {
+        let query = viewModel.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        let matchingRecent = viewModel.recentSearches.filter {
+            $0.localizedCaseInsensitiveContains(query)
+        }
+        let titles = viewModel.isLoading || viewModel.error != nil ? [] : visibleResults.map(\.name)
+        var seen = Set<String>()
+        return (titles + matchingRecent).filter { title in
+            let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  trimmed.caseInsensitiveCompare(query) != .orderedSame else { return false }
+            return seen.insert(trimmed.lowercased()).inserted
+        }.prefix(8).map { $0 }
+    }
+
     private var resultsCountLabel: String {
         let count = visibleResults.count
         if count == 1 {
@@ -422,12 +518,14 @@ struct NetflixSearchView: View {
                     )
                 )
             }
-        } else {
+        } else if detectedKeyboardMode == .linear {
             HStack(alignment: .top, spacing: NetflixSearchMetrics.columnGap) {
                 resultsList
                 resultsGrid
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            resultsGrid
         }
     }
 
@@ -545,8 +643,6 @@ struct NetflixSearchView: View {
         return visibleResults.first.map { "grid:\($0.id)" }
     }
 
-    /// List row the results area should focus when it (re)gains focus: the
-    /// row the user left on when armed and still present, else the first one.
     private var defaultItemFocusID: String? {
         if shouldRestoreFocus,
            let saved = lastFocusedItemID,
@@ -557,9 +653,7 @@ struct NetflixSearchView: View {
         return nil
     }
 
-    /// A 1080p Apple TV has room for six of these posters beside the text
-    /// index. Keeping that count explicit avoids `LazyVGrid` choosing a
-    /// smaller intrinsic width and leaving an unused sixth slot at the right.
+    /// Keep grid-mode posters within the content column beside the keyboard.
     private var gridColumns: [GridItem] {
         Array(
             repeating: GridItem(
@@ -567,7 +661,7 @@ struct NetflixSearchView: View {
                 spacing: NetflixSearchMetrics.posterGap,
                 alignment: .top
             ),
-            count: 6
+            count: detectedKeyboardMode == .grid ? NetflixSearchMetrics.gridColumnCount : 6
         )
     }
 

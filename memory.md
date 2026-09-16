@@ -395,15 +395,17 @@ the release version and `BUILD` with the next integer build number.
 5. The archive, staging folder, and IPA are intentionally ignored by Git and
    uploaded as release artifacts. Do not force-add them to the repository.
 
-### 8. Review and commit the exact source state
+### 8. Review and commit with the two-commit release rule
 
-1. Re-run `git diff --check` and inspect `git status --short`.
-2. Stage only the intended source, tests, project version, README, release
-   notes, and explicitly requested memory files by exact path.
-3. Confirm the cached diff contains no unrelated files or build products.
-4. Commit as `Release tvOS Beta X.Y.Z`.
-5. Confirm the worktree has no unintended unstaged release changes and that
-   the built artifact corresponds to the committed source state.
+Always maintain a clean separation between feature development and release metadata:
+
+1. **Commit 1 (Feature & Fix Updates):**
+   - Stage and commit all pending feature changes, bug fixes, refactorings, and unit/regression test additions.
+   - Use a clear, high-density commit message summarizing the changes (e.g., `Feature updates: ...` or `Fix ...`).
+2. **Commit 2 (Release Packaging):**
+   - Stage strictly the release-specific files: `tvosApp/NuvioTV.xcodeproj/project.pbxproj` (version/build bumps), `README.md` (latest beta block & download link), and `release/tvos-beta-X.Y.Z.md` (release notes).
+   - Commit as `Release tvOS Beta X.Y.Z`.
+3. Confirm the worktree is completely clean (`git status` reports nothing to commit).
 
 ### 9. Tag and push safely
 

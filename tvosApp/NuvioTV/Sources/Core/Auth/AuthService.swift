@@ -19,7 +19,10 @@ struct AuthService {
 
     private var baseURL: String { configuration.normalizedBackendURL }
     private var apiKey: String { configuration.publishableKey }
-    private var tvLoginWebBaseURL: String { configuration.normalizedBackendURL + "/tv-login" }
+    private var tvLoginWebBaseURL: String {
+        if isCustom { return configuration.normalizedBackendURL + "/tv-login" }
+        return AuthConfig.officialTvLoginWebBaseURL
+    }
     private var isCustom: Bool { configuration.backendIdentity != AuthConfig.officialAPIBaseURL }
     private var backendIdentity: String { configuration.backendIdentity }
 

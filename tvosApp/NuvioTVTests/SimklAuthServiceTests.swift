@@ -9,6 +9,7 @@ final class SimklAuthServiceTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        ProfileSettings.clearActiveProfile()
         suiteName = "SimklAuthServiceTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
@@ -21,6 +22,7 @@ final class SimklAuthServiceTests: XCTestCase {
     }
 
     override func tearDown() {
+        ProfileSettings.clearActiveProfile()
         SimklURLProtocolStub.handler = nil
         defaults.removePersistentDomain(forName: suiteName)
         SimklSyncCache.eraseAll()

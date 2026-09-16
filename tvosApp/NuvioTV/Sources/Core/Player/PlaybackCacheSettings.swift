@@ -36,13 +36,13 @@ struct PlaybackCacheSettings {
 
     /// Ceiling scaled to total device RAM (`physicalMemory` is bytes).
     /// Prefer staying far below jetsam: demuxer is only one slice of peak RSS.
-    /// > 3.5 GB (newer 4K) → 192/48, ~3 GB (common 4K) → 128/32, ≤ 2.5 GB (HD) → 64/16.
+    /// > 3.5 GB (newer 4K) → 256/64, ~3 GB (common 4K) → 192/48, ≤ 2.5 GB (HD) → 64/16.
     private static var auto: PlaybackCacheSettings {
         let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
         if gib > 3.5 {
-            return PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
         } else if gib > 2.5 {
-            return PlaybackCacheSettings(forwardBuffer: "128MiB", backBuffer: "32MiB")
+            return PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
         } else {
             return PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
         }

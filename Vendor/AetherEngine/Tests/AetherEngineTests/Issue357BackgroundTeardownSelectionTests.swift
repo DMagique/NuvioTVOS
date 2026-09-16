@@ -173,4 +173,16 @@ struct Issue357BackgroundTeardownSelectionTests {
         let selection = engine.consumeReloadSelection()
         #expect(selection.resumesPlaying)
     }
+
+    @Test("teardown parks the playhead before the video item is removed")
+    func teardownParksResumePosition() throws {
+        let engine = try AetherEngine()
+        engine.state = .paused
+        engine.clock.currentTime = 742.5
+
+        backgroundTeardown(engine)
+        let selection = engine.consumeReloadSelection()
+
+        #expect(selection.resumePosition == 742.5)
+    }
 }

@@ -4,9 +4,13 @@ import Foundation
 
 enum SimklRuntimeSession {
     static func profileScope() -> String {
-        let value = WatchedStore.activeProfileId?
+        let value = ProfileSettings.activeProfileScope.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.isEmpty && value != "default" {
+            return value
+        }
+        let watchedValue = WatchedStore.activeProfileId?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? "default" : value
+        return watchedValue.isEmpty ? (value.isEmpty ? "default" : value) : watchedValue
     }
 
     static func authenticatedState(
@@ -14,7 +18,16 @@ enum SimklRuntimeSession {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) -> SimklAuthState? {
-        let resolvedProfileScope = profileScope ?? self.profileScope()
+        let storeProfileId = store.string(forKey: "nuvio.tv.profile.settings.profileID")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedProfileScope: String
+        if let profileScope, !profileScope.isEmpty {
+            resolvedProfileScope = profileScope
+        } else if let storeProfileId, !storeProfileId.isEmpty {
+            resolvedProfileScope = storeProfileId
+        } else {
+            resolvedProfileScope = self.profileScope()
+        }
         let state = SimklAuthStore.state(
             in: store,
             profileScope: resolvedProfileScope,
@@ -757,6 +770,7 @@ struct SimklHistoryService {
         store: UserDefaults = ProfileSettings.current,
         force: Bool = false
     ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store) else { return false }
         let syncStartedAt = Date()
         guard let service = SimklAuthorizedClient(store: store),
               let activities = try? await SimklSyncLoader.activities(using: service) else {
@@ -798,6 +812,7 @@ struct SimklHistoryService {
             records = mergeHistory(records, response: delta)
         }
 
+        guard ProfileSettings.isActiveStore(store) else { return false }
         let previousItems = previousRecords.flatMap(\.items)
         let remoteItems = records.flatMap(\.items)
         guard WatchedStore.reconcileSimklSnapshot(
@@ -849,6 +864,7 @@ struct SimklHistoryService {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store) else { return false }
         guard let service = SimklAuthorizedClient(
             store: store,
             client: client,
@@ -1382,7 +1398,8 @@ struct SimklLibraryService {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
-        guard TraktSettingsStore.librarySourceMode(in: store) == .simkl,
+        guard ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.librarySourceMode(in: store) == .simkl,
               let service = SimklAuthorizedClient(
                 store: store,
                 client: client,
@@ -1403,7 +1420,7 @@ struct SimklLibraryService {
                 path: isInWatchlist ? "sync/add-to-list" : "sync/history/remove",
                 body: body
             )
-            guard (200..<300).contains(status) else { return false }
+            guard (200..<300).contains(status), ProfileSettings.isActiveStore(store) else { return false }
             NotificationCenter.default.post(
                 name: TraktLibraryService.mutationNotification,
                 object: TraktLibraryMutation(meta: meta, isInWatchlist: isInWatchlist)
@@ -1543,7 +1560,7 @@ enum SelectedLibraryService {
         case .local:
             return false
         case .trakt:
-            return TraktAuthStore.state.isAuthenticated
+            return TraktAuthStore.isAuthenticated
         case .simkl:
             return SimklRuntimeSession.authenticatedState() != nil
         case .mdblist:
@@ -2074,6 +2091,10 @@ struct SimklProgressService {
         tokenStorage: SimklTokenStorage = SimklKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store) else {
+            scrobbleDiagnostic = "skipped: inactive profile store"
+            return false
+        }
         guard TraktSettingsStore.watchProgressSource(in: store) == .simkl else {
             scrobbleDiagnostic = "skipped: watch progress source is "
                 + "\(TraktSettingsStore.watchProgressSource(in: store).rawValue), not simkl"
@@ -2126,8 +2147,10 @@ struct SimklProgressService {
             // succession drops the second event on the floor.
             if isLockCollision(status: response.status, data: response.data) {
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard ProfileSettings.isActiveStore(store) else { return false }
                 response = try await service.postReturningBody(path: path, body: body)
             }
+            guard ProfileSettings.isActiveStore(store) else { return false }
             let status = response.status
             // Simkl documents 409 stop as idempotent success for a recently
             // completed session.

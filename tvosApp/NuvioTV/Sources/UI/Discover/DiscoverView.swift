@@ -11,6 +11,8 @@ private enum DiscoverGridMetrics {
 /// The host provides the outer title, padding and background.
 struct DiscoverSection: View {
     let onContentClick: (String, String) -> Void
+    let isBesideKeyboard: Bool
+    let columnCount: Int?
     var onLongPress: ((NuvioMeta) -> Void)? = nil
     /// Lets an embedded host react to moving into a card or out of the
     /// Discover controls entirely (the Netflix Search host uses this to
@@ -44,6 +46,8 @@ struct DiscoverSection: View {
 
     init(
         onContentClick: @escaping (String, String) -> Void,
+        isBesideKeyboard: Bool = false,
+        columnCount: Int? = nil,
         onLongPress: ((NuvioMeta) -> Void)? = nil,
         onCardFocus: (() -> Void)? = nil,
         onFilterFocus: (() -> Void)? = nil,
@@ -51,6 +55,8 @@ struct DiscoverSection: View {
         parentTransitionActive: Binding<Bool>
     ) {
         self.onContentClick = onContentClick
+        self.isBesideKeyboard = isBesideKeyboard
+        self.columnCount = columnCount
         self.onLongPress = onLongPress
         self.onCardFocus = onCardFocus
         self.onFilterFocus = onFilterFocus
@@ -253,9 +259,10 @@ struct DiscoverSection: View {
                     .frame(height: 1)
                     .id("discover-grid-top")
 
-                LazyVGrid(columns: columns, alignment: .leading, spacing: DiscoverGridMetrics.posterGap) {
+                LazyVGrid(columns: columns, alignment: .leading, spacing: posterGap) {
                     ForEach(visibleItems) { item in
                         DiscoverCard(
+                            posterWidth: posterWidth,
                             meta: item,
                             externalFocus: $focusedCardID,
                             onFocusChange: { updateDiscoverFocus("card:\(item.id)", isFocused: $0) },
@@ -296,10 +303,16 @@ struct DiscoverSection: View {
         .defaultFocusIfAvailable($focusedCardID, shouldRestoreFocus ? lastFocusedCardID : nil)
     }
 
+    private var posterWidth: CGFloat { DiscoverGridMetrics.posterWidth }
+    private var posterGap: CGFloat { isBesideKeyboard || columnCount != nil ? 24 : DiscoverGridMetrics.posterGap }
+
     private var columns: [GridItem] {
-        [GridItem(
-            .adaptive(minimum: DiscoverGridMetrics.posterWidth, maximum: DiscoverGridMetrics.posterWidth),
-            spacing: DiscoverGridMetrics.posterGap,
+        if let count = isBesideKeyboard ? 5 : columnCount {
+            return Array(repeating: GridItem(.fixed(posterWidth), spacing: posterGap, alignment: .top), count: count)
+        }
+        return [GridItem(
+            .adaptive(minimum: posterWidth, maximum: posterWidth),
+            spacing: posterGap,
             alignment: .top
         )]
     }
@@ -394,6 +407,8 @@ struct FilterMenu<MenuContent: View>: View {
 // MARK: - Card
 
 private struct DiscoverCard: View {
+    var posterWidth: CGFloat = DiscoverGridMetrics.posterWidth
+    private var posterHeight: CGFloat { posterWidth * 1.5 }
     let meta: NuvioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
     var onFocusChange: ((Bool) -> Void)? = nil
@@ -420,9 +435,9 @@ private struct DiscoverCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CachedPosterArtwork(
                     urlString: meta.posterUrl,
-                    width: DiscoverGridMetrics.posterWidth,
-                    height: DiscoverGridMetrics.posterHeight,
-                    maximumWidth: DiscoverGridMetrics.posterWidth
+                    width: posterWidth,
+                    height: posterHeight,
+                    maximumWidth: posterWidth
                 ) {
                     ZStack {
                         Rectangle().fill(Color.white.opacity(0.07))
@@ -431,7 +446,7 @@ private struct DiscoverCard: View {
                             .foregroundColor(.white.opacity(0.25))
                     }
                 }
-                .frame(width: DiscoverGridMetrics.posterWidth, height: DiscoverGridMetrics.posterHeight)
+                .frame(width: posterWidth, height: posterHeight)
                 .clipShape(shape)
                 .modifier(
                     LiquidGlassCardModifier(
@@ -460,7 +475,7 @@ private struct DiscoverCard: View {
                                 .foregroundColor(.white.opacity(0.45))
                         }
                     }
-                    .frame(width: DiscoverGridMetrics.posterWidth, alignment: .leading)
+                    .frame(width: posterWidth, alignment: .leading)
                 }
             }
             .scaleEffect(showsFocusedAppearance ? 1.06 : 1.0)

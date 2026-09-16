@@ -5,6 +5,8 @@
 # Xcode
 #
 build/
+# Local derived-data cache used by this checkout
+build_derived/
 *.pbxuser
 !default.pbxuser
 *.mode1v3

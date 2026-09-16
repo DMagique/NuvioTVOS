@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import AVKit
 import Combine
+import CoreGraphics
+import CoreImage
 #if os(tvOS) || os(iOS)
 import MediaPlayer
 #endif
@@ -214,6 +216,8 @@ final class NativeAVPlayerHost {
     // MARK: - Private state
 
     private var playerItem: AVPlayerItem?
+    private var videoOutput: AVPlayerItemVideoOutput?
+    private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
     /// Applied immediately and replayed onto fresh items across internal reloads so Now Playing title/artwork survives audio-switch/background-reopen seams.
     private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
@@ -500,6 +504,11 @@ final class NativeAVPlayerHost {
         if armIngestFallback {
             startCarriageProbe(asset: asset, url: url, httpHeaders: httpHeaders)
         }
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+        ])
+        item.add(output)
+        self.videoOutput = output
         playerItem = item
         accessLogCount = 0
         failure = nil
@@ -1922,6 +1931,10 @@ final class NativeAVPlayerHost {
         playIntent = false
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
+        if let videoOutput {
+            playerItem?.remove(videoOutput)
+            self.videoOutput = nil
+        }
         playerItem = nil
         isReady = false
         // AE#443: a fresh load is a fresh session, so the retired items' bytes go with the old one.
@@ -1933,6 +1946,29 @@ final class NativeAVPlayerHost {
         rate = 0
         // The AVAudioSession is NOT released here. Teardown ordering is the engine's call, not the host's:
         // AetherEngine.stopInternal deactivates once every render path is quiesced (#215).
+    }
+
+    /// Captures the most recently decoded video frame directly from the presentation buffer.
+    /// Scaled to `maxWidth` via CoreImage Metal pipeline with 0 extra HTTP reads or decoders.
+    func captureCurrentFrame(maxWidth: Int = 320) -> CGImage? {
+        guard let item = playerItem, let output = videoOutput else { return nil }
+        let time = item.currentTime()
+        guard let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
+            return nil
+        }
+        let ciImage = CIImage(cvPixelBuffer: buffer)
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let scale = min(1.0, CGFloat(maxWidth) / extent.width)
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        } else {
+            scaledImage = ciImage
+        }
+
+        return ciContext.createCGImage(scaledImage, from: scaledImage.extent)
     }
 
     /// Dump asset URL + track FourCCs on .failed and asset.load failure; d9b8aa5 added the asset.load path because item.status never went .failed in DrHurt's P5 MKV session.

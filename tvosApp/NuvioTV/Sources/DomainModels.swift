@@ -708,11 +708,11 @@ public class ProfileViewModel: ObservableObject {
         guard let manager = profileManager else {
             let profile = profiles.first
             // Scope watch history and settings to this profile before the UI reads them.
+            ProfileSettings.setActiveProfile(profile?.id, isPrimary: profile?.isAdmin)
             ContinueWatchingStore.setActiveProfile(profile?.id)
             LibraryStore.setActiveProfile(profile?.id)
             WatchedStore.setActiveProfile(profile?.id)
             CollectionsStore.setActiveProfile(profile?.id)
-            ProfileSettings.setActiveProfile(profile?.id)
             // Before anything else can write: an oversized preferences
             // plist aborts the process on the next unrelated set.
             SimklSyncCache.purgeLegacyPreferenceBlobs(in: ProfileSettings.current)
@@ -722,11 +722,11 @@ public class ProfileViewModel: ObservableObject {
         do {
             let profile = try manager.getActiveProfile()
             // Scope watch history and settings to this profile before the UI reads them.
+            ProfileSettings.setActiveProfile(profile?.id, isPrimary: profile?.isAdmin)
             ContinueWatchingStore.setActiveProfile(profile?.id)
             LibraryStore.setActiveProfile(profile?.id)
             WatchedStore.setActiveProfile(profile?.id)
             CollectionsStore.setActiveProfile(profile?.id)
-            ProfileSettings.setActiveProfile(profile?.id)
             // Before anything else can write: an oversized preferences
             // plist aborts the process on the next unrelated set.
             SimklSyncCache.purgeLegacyPreferenceBlobs(in: ProfileSettings.current)
@@ -973,11 +973,11 @@ public class ProfileViewModel: ObservableObject {
             remoteProfiles.first(where: { $0.id == preferredId })
         } ?? remoteProfiles.first
 
+        ProfileSettings.setActiveProfile(profile?.id, isPrimary: profile?.isAdmin)
         ContinueWatchingStore.setActiveProfile(profile?.id)
         LibraryStore.setActiveProfile(profile?.id)
         WatchedStore.setActiveProfile(profile?.id)
         CollectionsStore.setActiveProfile(profile?.id)
-        ProfileSettings.setActiveProfile(profile?.id)
         // Before anything else can write: an oversized preferences
         // plist aborts the process on the next unrelated set.
         SimklSyncCache.purgeLegacyPreferenceBlobs(in: ProfileSettings.current)
@@ -1020,11 +1020,11 @@ public class ProfileViewModel: ObservableObject {
         ProfileSettings.eraseAll(profileIds: previousIds + (1...6).map(String.init) + [guest.id])
         NuvioSyncManager.eraseProfileIndexBindings()
 
+        ProfileSettings.setActiveProfile(guest.id, isPrimary: guest.isAdmin)
         ContinueWatchingStore.setActiveProfile(guest.id)
         LibraryStore.setActiveProfile(guest.id)
         WatchedStore.setActiveProfile(guest.id)
         CollectionsStore.setActiveProfile(guest.id)
-        ProfileSettings.setActiveProfile(guest.id)
     }
 }
 

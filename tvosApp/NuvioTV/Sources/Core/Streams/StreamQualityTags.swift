@@ -53,6 +53,7 @@ struct StreamQualityTags: Equatable, Codable {
     var quality: DebridStreamQuality = .unknown
     var bingeGroup: String? = nil
     var addonName: String? = nil
+    var releaseFingerprint: String? = nil
 
     var hasVisualPreference: Bool { isDolbyVision || isHDR }
     var hasAudioPreference: Bool { isAtmos }
@@ -72,6 +73,86 @@ struct StreamQualityTags: Equatable, Codable {
         return resolution == 0 || resolution <= capability.maxResolution
     }
 
+    /// Safely resolves the parent series/meta ID from an episode content ID without
+    /// truncating namespaced identifiers like `tmdb:12345:1:2` or `kitsu:999:1`.
+    static func seriesId(fromContentId contentId: String) -> String {
+        let trimmed = contentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let parts = trimmed.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        // 4+ parts (e.g. tmdb:12345:1:2): drop season & episode if numeric
+        if parts.count >= 4,
+           let season = Int(parts[parts.count - 2]), season < 300,
+           Int(parts[parts.count - 1]) != nil {
+            return parts.dropLast(2).joined(separator: ":")
+        }
+        // Exactly 3 parts:
+        // Case A: tt1234567:1:2 (both parts are numeric) -> drop both, return tt1234567
+        // Case B: kitsu:999:1 or anime:id:ep (only last part is numeric) -> drop last 1, return kitsu:999
+        if parts.count == 3 {
+            if let season = Int(parts[1]), season < 300, Int(parts[2]) != nil {
+                return parts[0]
+            }
+            if Int(parts[2]) != nil {
+                return parts.dropLast(1).joined(separator: ":")
+            }
+        }
+        // 1 or 2 parts (e.g. tt1234567, tmdb:99999, kitsu:999): it's already a series or movie ID
+        return trimmed
+    }
+
+    /// Extracts known scene or P2P release group names from release text.
+    static func extractReleaseGroup(from text: String?) -> String? {
+        guard let text, !text.isEmpty else { return nil }
+        let patterns = [
+            #"(?:^|[\s._\-\[])-(?<group>[A-Za-z0-9]+)(?:\]|\.[a-zA-Z0-9]{2,4}|$)"#,
+            #"\[(?<group>[A-Za-z0-9]{2,15})\]"#,
+            #"\b(?<group>FLUX|NTb|PSA|MeGusta|ION10|GalaxyTV|QxR|SMURF|KOGi|YTS|EZTV|TGX|EVO|CMRG|ROVERS|DIMENSION|KiNGS|STRONT|EDITH|GLHF|CAKES|SUCCESS|DRACULA|SURF|BAMBOOZLE|TEPES|MiNX|TBS|monkee|CasStudio|T6D|SQUEAK|NOGRP)\b"#
+        ]
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) {
+                let range = match.range(withName: "group")
+                if range.location != NSNotFound, let swiftRange = Range(range, in: text) {
+                    let group = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let lower = group.lowercased()
+                    // Filter out common format/codec false positives
+                    if !["1080p", "720p", "2160p", "4k", "hdr", "mkv", "mp4", "x264", "x265", "hevc", "h264", "aac", "ddp5", "web", "dl", "sub", "dub"].contains(lower) {
+                        return group.uppercased()
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Derives a stable release fingerprint when `behaviorHints.bingeGroup` is missing from the stream.
+    static func syntheticBingeGroup(for stream: NuvioStream) -> String? {
+        if let bg = stream.bingeGroup?.trimmingCharacters(in: .whitespacesAndNewlines), !bg.isEmpty {
+            return bg
+        }
+        let text = [stream.filename, stream.description, stream.name].compactMap { $0 }.joined(separator: " ")
+        guard !text.isEmpty else { return nil }
+        let relGroup = extractReleaseGroup(from: text)
+        let tags = StreamQualityTags.parse(
+            name: stream.name,
+            description: stream.description,
+            filename: stream.filename,
+            url: stream.url,
+            bingeGroup: nil,
+            addonName: stream.addonName,
+            isCachedHint: stream.isCached,
+            releaseFingerprint: nil
+        )
+        let addon = stream.addonName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let relGroup {
+            return "\(addon)|\(relGroup)|\(tags.resolution)|\(tags.quality.rawValue)".lowercased()
+        }
+        if !addon.isEmpty && tags.resolution >= 720 {
+            return "\(addon)|\(tags.resolution)|\(tags.quality.rawValue)".lowercased()
+        }
+        return nil
+    }
+
     static func parse(
         name: String? = nil,
         description: String? = nil,
@@ -79,7 +160,8 @@ struct StreamQualityTags: Equatable, Codable {
         url: String? = nil,
         bingeGroup: String? = nil,
         addonName: String? = nil,
-        isCachedHint: Bool? = nil
+        isCachedHint: Bool? = nil,
+        releaseFingerprint: String? = nil
     ) -> StreamQualityTags {
         // Exclude stream URLs from resolution and quality parsing. URLs often contain random
         // hex hashes, timestamps, port numbers, or query parameters (e.g. /720/ or ?v=2k) that
@@ -122,44 +204,62 @@ struct StreamQualityTags: Equatable, Codable {
         if let addonName, !addonName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             tags.addonName = addonName.trimmingCharacters(in: .whitespacesAndNewlines)
         }
+        if let releaseFingerprint, !releaseFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            tags.releaseFingerprint = releaseFingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return tags
     }
 
     static func parse(stream: NuvioStream) -> StreamQualityTags {
-        parse(
+        var tags = parse(
             name: stream.name,
             description: stream.description,
             filename: stream.filename,
             url: stream.url,
             bingeGroup: stream.bingeGroup,
             addonName: stream.addonName,
-            isCachedHint: stream.isCached
+            isCachedHint: stream.isCached,
+            releaseFingerprint: nil
         )
+        tags.releaseFingerprint = syntheticBingeGroup(for: stream)
+        return tags
     }
 
     /// Higher is a better match to the previously watched stream / quality prefs.
     func matchScore(against preferred: StreamQualityTags) -> Int {
-        // Preferred quality tags must have valid resolution (>= 720p). If a corrupt/ticket
-        // stream was previously saved as preference, do not match against it.
-        guard preferred.resolution >= 720 else { return 0 }
-        if resolution == 0 { return -300_000 }
+        // Preferred quality tags must have valid resolution (>= 720p), or a valid bingeGroup/releaseFingerprint.
+        guard preferred.resolution >= 720 || preferred.bingeGroup != nil || preferred.releaseFingerprint != nil else { return 0 }
+        if resolution == 0 && bingeGroup == nil && releaseFingerprint == nil { return -300_000 }
 
         var score = 0
         if let preferredGroup = preferred.bingeGroup,
            let group = bingeGroup,
            preferredGroup.compare(group, options: .caseInsensitive) == .orderedSame {
             // Stremio defines bingeGroup specifically for matching the same
-            // release across episodes. Only reward if the current stream is also valid (>= 720p).
-            if resolution >= 720 {
+            // release across episodes. Only reward if the current stream is also valid (>= 720p or matches preferred resolution).
+            if resolution >= 720 || resolution == preferred.resolution {
                 score += 500_000
             }
+        } else if let preferredFingerprint = preferred.releaseFingerprint,
+                  let fingerprint = releaseFingerprint,
+                  preferredFingerprint.compare(fingerprint, options: .caseInsensitive) == .orderedSame {
+            // Synthetic release fingerprint match (same release group, resolution tier, and addon)
+            if resolution >= 720 || resolution == preferred.resolution {
+                score += 400_000
+            }
         }
+
         if let preferredAddon = preferred.addonName,
            let addon = addonName,
            preferredAddon.compare(addon, options: .caseInsensitive) == .orderedSame {
             // Only reward addon continuity if the stream has a valid resolution (not an unknown/ticket entry).
             if resolution >= 720 {
-                score += 50_000
+                if preferred.resolution > 0 && resolution == preferred.resolution {
+                    // Strong continuity boost for same addon AND exact same resolution tier
+                    score += 250_000
+                } else {
+                    score += 50_000
+                }
             }
         }
         if preferred.isDolbyVision, isDolbyVision { score += 80_000 }
@@ -271,11 +371,14 @@ enum LastStreamQualityStore {
     }
 
     static func save(metaId: String, stream: NuvioStream, profileId: String? = nil) {
+        if SmartPlaybackSelector.isLowQualityOrTicketStream(stream) { return }
         var tags = StreamQualityTags.parse(stream: stream)
         if tags.resolution == 0 {
             tags.resolution = SmartPlaybackSelector.inferredResolution(for: stream)
         }
+        guard tags.resolution >= 720 else { return }
         save(metaId: metaId, tags: tags, profileId: profileId)
+        BingeGroupStore.save(seriesId: metaId, stream: stream, profileId: profileId)
     }
 
     static func save(
@@ -298,14 +401,37 @@ enum LastStreamQualityStore {
     static func load(metaId: String, profileId: String? = nil) -> StreamQualityTags? {
         let key = prefix + metaId
         let store = defaults(for: profileId)
-        guard let data = store.data(forKey: key) else { return nil }
-        guard let tags = try? JSONDecoder().decode(StreamQualityTags.self, from: data) else { return nil }
-        // Self-heal: purge corrupt/sub-720p/ticket tags from UserDefaults so a title never gets stuck on N/A
-        if tags.resolution < 720 {
-            store.removeObject(forKey: key)
-            return nil
+        let loadedTags: StreamQualityTags? = {
+            guard let data = store.data(forKey: key) else { return nil }
+            guard let tags = try? JSONDecoder().decode(StreamQualityTags.self, from: data) else { return nil }
+            // Self-heal: purge corrupt/sub-720p/ticket tags from UserDefaults so a title never gets stuck on N/A
+            if tags.resolution < 720 {
+                store.removeObject(forKey: key)
+                return nil
+            }
+            return tags
+        }()
+
+        if var tags = loadedTags {
+            if let binge = BingeGroupStore.load(seriesId: metaId, profileId: profileId) {
+                if tags.bingeGroup == nil { tags.bingeGroup = binge.bingeGroup }
+                if tags.addonName == nil { tags.addonName = binge.addonName }
+                if tags.releaseFingerprint == nil { tags.releaseFingerprint = binge.releaseFingerprint }
+            }
+            return tags
+        } else if let binge = BingeGroupStore.load(seriesId: metaId, profileId: profileId),
+                  binge.resolution >= 720,
+                  binge.bingeGroup != nil || binge.releaseFingerprint != nil {
+            return StreamQualityTags(
+                resolution: binge.resolution,
+                isCached: binge.isCached,
+                quality: binge.quality,
+                bingeGroup: binge.bingeGroup,
+                addonName: binge.addonName,
+                releaseFingerprint: binge.releaseFingerprint
+            )
         }
-        return tags
+        return nil
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {

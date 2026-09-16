@@ -2288,7 +2288,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return prov?.sealedLiveTargetDurationSeconds
     }
 
-    func scrubThumbnailSource(atSeconds seconds: Double) -> (data: Data, segmentIndex: Int)? {
+    func scrubThumbnailSource(atSeconds seconds: Double) -> (data: Data, segmentIndex: Int, startSeconds: Double)? {
         restartLock.lock()
         let prov = provider
         restartLock.unlock()
@@ -2296,7 +2296,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let seg = prov.thumbnailSegment(atSeconds: seconds) else { return nil }
         guard let initData = prov.peekInitSegment(),
               let segData = try? Data(contentsOf: seg.fileURL) else { return nil }
-        return (initData + segData, seg.index)
+        return (initData + segData, seg.index, seg.startSeconds)
     }
 
     public func stop() {

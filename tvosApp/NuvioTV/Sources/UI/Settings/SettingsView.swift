@@ -144,6 +144,9 @@ enum SettingsKey {
     /// rows by this; kept separate from `homeCatalogOrder` (the local tvOS
     /// reorder) so a pull never disturbs the built-in rows or a local reorder.
     static let homeCatalogSyncedOrder = "nuvio.tv.settings.layout.homeCatalogSyncedOrder"
+    /// JSON `[String: String]` of catalog key (`<addonId>_<type>_<catalogId>`) → custom display title
+    /// synced from the webapp or Android app.
+    static let homeCatalogCustomTitles = "nuvio.tv.settings.layout.homeCatalogCustomTitles"
     static let homeCatalogShowType = "nuvio.tv.settings.layout.homeCatalogShowType"
     static let heroEnabled = "nuvio.tv.settings.layout.heroEnabled"
     /// JSON `[String]` of Home section ids selected as Grid View hero sources.
@@ -242,6 +245,7 @@ enum SettingsKey {
     static let jellyfinLocalRowEnabled = "nuvio.tv.settings.integrations.jellyfinLocalRowEnabled"
 
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
+    static let trickplayServer = "nuvio.tv.settings.playback.trickplayServer"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
@@ -256,6 +260,8 @@ enum SettingsKey {
     static let streamBadgePlacement = "nuvio.tv.settings.playback.streamBadgePlacement"
     static let autoPlayNext = "nuvio.tv.settings.playback.autoPlayNext"
     static let autoPlayNextCountdown = "nuvio.tv.settings.playback.autoPlayNextCountdown"
+    static let streamAutoPlayPreferBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayPreferBingeGroup"
+    static let streamAutoPlayReuseBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayReuseBingeGroup"
     static let postPlayRecommendationsEnabled = "nuvio.tv.settings.playback.postPlayRecommendationsEnabled"
     static let trailersEnabled = "nuvio.tv.settings.playback.trailersEnabled"
     static let trailerPreviewSound = "nuvio.tv.settings.playback.trailerPreviewSound"
@@ -278,6 +284,7 @@ enum SettingsKey {
     static let playerShowEpisodes = "nuvio.tv.settings.playback.showEpisodes"
     static let playerShowSources = "nuvio.tv.settings.playback.showSources"
     static let playerShowSubtitles = "nuvio.tv.settings.playback.showSubtitles"
+    static let seekPreviewEnabled = "nuvio.tv.settings.playback.seekPreviewEnabled"
 
     static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
     static let smoothFocus = "nuvio.tv.settings.advanced.smoothFocus"
@@ -291,7 +298,7 @@ enum SettingsKey {
     /// Credentials and device acknowledgements must remain on this Apple TV
     /// and never enter the account settings payload.
     static let deviceLocal = Set([
-        traktClientID, traktClientSecret, simklClientID, aiSubtitlesGeminiAPIKey,
+        traktConnected, traktClientID, traktClientSecret, simklClientID, aiSubtitlesGeminiAPIKey,
         p2pConsentAccepted
     ])
 
@@ -326,12 +333,12 @@ enum SettingsKey {
         streamAddonManifestStates,
         playerEngine, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         cachedOnlyStreams, preferHardwareDecodedStreams, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
-        autoPlayNext, autoPlayNextCountdown, postPlayRecommendationsEnabled, trailersEnabled, trailerPreviewSound, trailerDelay,
+        autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
         forcedSubtitles, subtitleSize, frameRateMatching, networkCache, playbackTrackSelections,
         externalPlayerForwardSubtitles, assOverrideMode,
-        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles,
+        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, seekPreviewEnabled,
         fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter
     ] + SubtitleStyleKey.all
 }
@@ -2539,7 +2546,7 @@ private struct HomeLayoutLivePreview: View {
     private var heroDetailsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Glowing stylized title logo
-            Text("OBSESSION")
+            Text("DUNE: PART TWO")
                 .font(.system(size: 24, weight: .black, design: .rounded))
                 .foregroundStyle(
                     LinearGradient(
@@ -2551,13 +2558,13 @@ private struct HomeLayoutLivePreview: View {
 
             // Metadata line
             HStack(spacing: 5) {
-                Text("Movie · Horror · 1h 49m · May 15, 2026 · IMDb 7.9")
+                Text("Movie · Sci-Fi · 2h 46m · Mar 1, 2024 · IMDb 8.6")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.70))
             }
 
             // Multi-line synopsis
-            Text("After breaking the mysterious \"One Wish Willow\" to win his crush's heart, a hopeless romantic finds himself getting exactly what he asked for but soon discovers that some desires come at a dark, sinister price.")
+            Text("Paul Atreides unites with Chani and the Fremen while seeking revenge against the conspirators who destroyed his family.")
                 .font(.system(size: 7.8, weight: .regular))
                 .foregroundColor(.white.opacity(0.68))
                 .lineLimit(2)
@@ -2640,7 +2647,7 @@ private struct HomeLayoutLivePreview: View {
                         )
 
                         if posterLabels {
-                            Text("Obsession")
+                            Text("Dune: Part Two")
                                 .font(.system(size: 7.5, weight: .bold))
                                 .foregroundColor(.white)
                                 .lineLimit(1)
@@ -2801,7 +2808,7 @@ private struct LayoutDiscoverySettingsView: View {
     // Search is the only screen that currently hosts the full Discover surface.
     // Do not offer Home/Library as dead selections that merely hide Discover.
     private let discoverLocations = ["Search", "Off"]
-    private let searchStyles = ["Netflix", "Classic", "Native"]
+    private let searchStyles = ["Netflix", "Classic", "Native", "Grid"]
     private let continueWatchingSorts = ["Default", "Streaming Style", "Separate Upcoming Row"]
 
     var body: some View {
@@ -2946,7 +2953,7 @@ private struct LayoutDiscoverySettingsView: View {
                     title: L10n.string("tvos_layout_search_style", fallback: "Search Style"),
                     subtitle: L10n.string(
                         "tvos_layout_search_style_subtitle",
-                        fallback: "Netflix uses the built-in tvOS keyboard with a title list beside the posters; Classic uses the system keyboard over a full-width grid; Native uses the built-in tvOS single-row keyboard"
+                        fallback: "Netflix uses the built-in tvOS keyboard with a title list beside the posters; Classic uses the system keyboard over a full-width grid; Native uses the single-row linear keyboard; Grid uses the native side-by-side multi-row grid keyboard"
                     ),
                     selection: $searchStyle,
                     options: searchStyles,
@@ -3212,24 +3219,28 @@ private func layoutVisibleHomeCatalogRows() -> [TVHomeCatalogOrder.SnapshotRow] 
         ]
         let existingIDs = Set(merged.map(\.id))
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+        let customTitles = TVHomeCatalogOrder.customCatalogTitles()
         for row in simklBuiltIns where !existingIDs.contains(row.id) {
+            let key = TVHomeCatalogOrder.catalogSettingsKey(
+                addonId: "simkl",
+                contentType: row.type,
+                catalogId: row.catalogId
+            )
             merged.append(
                 TVHomeCatalogOrder.SnapshotRow(
                     id: row.id,
                     title: TVHomeCatalogOrder.catalogDisplayTitle(
                         row.title,
                         contentType: row.type,
-                        showType: showType
+                        showType: showType,
+                        addonName: "Simkl",
+                        customTitle: customTitles[key]
                     ),
                     addonName: "Simkl",
                     addonId: "simkl",
                     contentType: row.type,
                     catalogId: row.catalogId,
-                    settingsKey: TVHomeCatalogOrder.catalogSettingsKey(
-                        addonId: "simkl",
-                        contentType: row.type,
-                        catalogId: row.catalogId
-                    )
+                    settingsKey: key
                 )
             )
         }
@@ -6490,6 +6501,9 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.showAddonLogo) private var showAddonLogo = false
     @AppStorage(SettingsKey.streamBadgePlacement) private var streamBadgePlacement = StreamBadgePlacement.bottom.rawValue
     @AppStorage(SettingsKey.autoPlayNext) private var autoPlayNext = true
+    @AppStorage(SettingsKey.streamAutoPlayPreferBingeGroup) private var streamAutoPlayPreferBingeGroup = true
+    @AppStorage(SettingsKey.streamAutoPlayReuseBingeGroup) private var streamAutoPlayReuseBingeGroup = true
+    @AppStorage(SettingsKey.seekPreviewEnabled) private var seekPreviewEnabled = true
     @AppStorage(SettingsKey.postPlayRecommendationsEnabled) private var postPlayRecommendationsEnabled = true
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
@@ -6572,12 +6586,39 @@ private struct PlaybackSettingsView: View {
                 )
 
                 SettingsToggleRow(
+                    title: L10n.string("tvos_settings_prefer_binge_group", fallback: "Prefer Same Source / Binge Group"),
+                    subtitle: L10n.string(
+                        "tvos_settings_prefer_binge_group_subtitle",
+                        fallback: "Keep using streams from the same release group, add-on, and resolution across next episodes and continue watching."
+                    ),
+                    isOn: $streamAutoPlayPreferBingeGroup,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_reuse_binge_group", fallback: "Reuse Binge Group Source"),
+                    subtitle: L10n.string(
+                        "tvos_settings_reuse_binge_group_subtitle",
+                        fallback: "Automatically match and play the identical stream source across consecutive episodes."
+                    ),
+                    isOn: $streamAutoPlayReuseBingeGroup,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
                     title: L10n.string("tvos_settings_post_play_recommendations", fallback: "Post-Play Recommendations"),
                     subtitle: L10n.string(
                         "tvos_settings_post_play_recommendations_subtitle",
                         fallback: "Show paged recommendations with trailer previews and quick play when reaching the end of movies or series."
                     ),
                     isOn: $postPlayRecommendationsEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_seeking_preview", fallback: "Seeking Preview"),
+                    subtitle: L10n.string("tvos_settings_seeking_preview_subtitle", fallback: "Show thumbnail previews while scrubbing through video"),
+                    isOn: $seekPreviewEnabled,
                     accentColor: accentColor
                 )
 
@@ -7601,7 +7642,6 @@ private struct AdvancedSettingsView: View {
     let accentColor: Color
 
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
-    @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
     @AppStorage(SettingsKey.playbackDebug) private var playbackDebug = false
     @State private var isSeedingTestHistory = false
@@ -7628,13 +7668,6 @@ private struct AdvancedSettingsView: View {
                     accentColor: accentColor
                 )
                 .settingsEntryAnchor()
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_smooth_bring_into_view", fallback: "Smooth Bring Into View"),
-                    subtitle: L10n.string("tvos_settings_animate_focused_content_into_a_readable_position", fallback: "Animate focused content into a readable position"),
-                    isOn: $smoothFocus,
-                    accentColor: accentColor
-                )
             }
 
             SettingsGroup(
@@ -9321,21 +9354,7 @@ private struct AddonsSettingsSection: View {
         addonName: String
     ) -> [TVHomeCatalogOrder.SnapshotRow] {
         let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources: [CatalogHomeVisibilityResolver.Source] = CollectionsStore.collections().flatMap { collection in
-            collection.folders.flatMap { $0.resolvedSources }
-                .filter { $0.normalizedProvider == "addon" }
-                .compactMap { source in
-                    guard let sourceAddonID = source.addonId,
-                          let sourceType = source.type,
-                          let sourceCatalogID = source.catalogId else { return nil }
-                    return CatalogHomeVisibilityResolver.Source(
-                        addonIdentifier: sourceAddonID,
-                        contentType: sourceType,
-                        catalogID: sourceCatalogID,
-                        collectionID: collection.id
-                    )
-                }
-        }
+        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
         let catalogs = (manifest.catalogs ?? []).filter { catalog in
             catalog.eligibleForHome
                 && CatalogHomeVisibilityResolver.shouldInclude(
@@ -9364,22 +9383,26 @@ private struct AddonsSettingsSection: View {
     ) -> TVHomeCatalogOrder.SnapshotRow? {
         guard let type = catalog.type,
               let catalogID = catalog.id else { return nil }
+        let settingsKey = TVHomeCatalogOrder.catalogSettingsKey(
+            addonId: addonID,
+            contentType: type,
+            catalogId: catalogID
+        )
+        let customTitle = TVHomeCatalogOrder.customTitle(forCatalogKey: settingsKey)
         return TVHomeCatalogOrder.SnapshotRow(
             id: "addon_\(addonID)_\(type)_\(catalogID)",
             title: TVHomeCatalogOrder.catalogDisplayTitle(
                 catalog.name ?? catalogID,
                 contentType: type,
-                showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+                showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true,
+                addonName: addonName,
+                customTitle: customTitle
             ),
             addonName: addonName,
             addonId: addonID,
             contentType: type,
             catalogId: catalogID,
-            settingsKey: TVHomeCatalogOrder.catalogSettingsKey(
-                addonId: addonID,
-                contentType: type,
-                catalogId: catalogID
-            )
+            settingsKey: settingsKey
         )
     }
 

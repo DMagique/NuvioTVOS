@@ -11,6 +11,7 @@ final class MdbListScrobbleTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        ProfileSettings.clearActiveProfile()
         suiteName = "MdbListScrobbleTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)
         defaults.removePersistentDomain(forName: suiteName)
@@ -24,6 +25,7 @@ final class MdbListScrobbleTests: XCTestCase {
     }
 
     override func tearDown() {
+        ProfileSettings.clearActiveProfile()
         MdbListURLProtocolStub.handler = nil
         defaults.removePersistentDomain(forName: suiteName)
         defaults = nil

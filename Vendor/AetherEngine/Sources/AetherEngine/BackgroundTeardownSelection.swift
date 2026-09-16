@@ -13,6 +13,10 @@ struct BackgroundTeardownSelection: Sendable, Equatable {
     var subtitles = SubtitleSessionCarryover()
     var audioTrackIndex: Int?
     var discTitleID: Int?
+    /// The playhead captured before `stopInternal` removes the active video item.
+    /// Keep this separate from the live engine clock: teardown can invalidate the
+    /// host and publish a zero position before the foreground reload starts.
+    var resumePosition: Double?
     var resumesPlaying: Bool = false
 }
 
@@ -25,6 +29,7 @@ extension AetherEngine {
             subtitles: captureSubtitleSessionCarryover(),
             audioTrackIndex: activeAudioTrackIndex,
             discTitleID: activeDiscTitleID,
+            resumePosition: positionForSessionRebuild,
             resumesPlaying: sessionRebuildResumesPlaying
         )
     }
@@ -39,6 +44,7 @@ extension AetherEngine {
                 live: captureSubtitleSessionCarryover(), snapshot: parked?.subtitles),
             audioTrackIndex: activeAudioTrackIndex ?? parked?.audioTrackIndex,
             discTitleID: activeDiscTitleID ?? parked?.discTitleID,
+            resumePosition: parked?.resumePosition,
             resumesPlaying: parked?.resumesPlaying ?? sessionRebuildResumesPlaying
         )
     }

@@ -23,6 +23,7 @@ captures
 node_modules/
 **/Pods/
 logs/
+/sideloadlydaemon.log
 analysis/
 Docs
 keystore/

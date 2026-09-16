@@ -24,6 +24,11 @@ struct PlaybackLoadRequest: Equatable {
     var streamName: String?
     var streamDescription: String?
     var filename: String?
+    /// Canonical content identity (SHA-256 over imdbId/season/ep/durationBucket)
+    /// allowing preview caches to survive debrid URL changes and token expiration.
+    var canonicalMediaKey: String?
+    /// Direct storyboard/trickplay manifest URL (WebVTT) when supplied by the stream add-on.
+    var trickplayURL: URL?
 
     init(
         videoURL: URL,
@@ -43,7 +48,9 @@ struct PlaybackLoadRequest: Equatable {
         audioGainDB: Double = 0,
         streamName: String? = nil,
         streamDescription: String? = nil,
-        filename: String? = nil
+        filename: String? = nil,
+        canonicalMediaKey: String? = nil,
+        trickplayURL: URL? = nil
     ) {
         self.videoURL = videoURL
         self.audioURL = audioURL
@@ -63,6 +70,8 @@ struct PlaybackLoadRequest: Equatable {
         self.streamName = streamName
         self.streamDescription = streamDescription
         self.filename = filename
+        self.canonicalMediaKey = canonicalMediaKey
+        self.trickplayURL = trickplayURL
     }
 }
 
@@ -88,9 +97,18 @@ enum PlaybackCacheProfile: String, Equatable {
     var aetherForwardBufferSegments: Int {
         switch self {
         case .conservative: return 4
-        case .medium, .auto: return 10
+        case .medium: return 10
         case .large: return 30
         case .max: return 60
+        case .auto:
+            let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+            if gib > 3.5 {
+                return 30
+            } else if gib > 2.5 {
+                return 20
+            } else {
+                return 10
+            }
         }
     }
 }

@@ -209,12 +209,12 @@ class DetailsViewModel: ObservableObject {
                     await self.applyMdbRatings(mdbRatings, for: meta.id, generation: generation)
                 }
 
-                // 7. Authenticated MDBList user rating -> Apply immediately when ready
-                group.addTask {
-                    guard MdbListRuntimeSession.isAuthenticated() else { return }
-                    let rating = await MdbListRatingsService.fetchRating(for: meta)
-                    await self.applyMdbListUserRating(rating, for: meta.id, generation: generation)
-                }
+                // 7. Authenticated MDBList user rating -> Disabled for now
+                // group.addTask {
+                //     guard MdbListRuntimeSession.isAuthenticated() else { return }
+                //     let rating = await MdbListRatingsService.fetchRating(for: meta)
+                //     await self.applyMdbListUserRating(rating, for: meta.id, generation: generation)
+                // }
 
                 // 8. MDBList watchlist membership -> Keep the library action
                 // aligned with the selected remote library owner.
@@ -326,7 +326,7 @@ class DetailsViewModel: ObservableObject {
         let preferredSource = TraktSettingsStore.moreLikeThisSource
 
         async let tmdbTask = TmdbDetailsService.fetchMoreLikeThis(for: meta)
-        async let traktTask: [RelatedTitle] = (preferredSource == .trakt || TraktAuthStore.state.isAuthenticated)
+        async let traktTask: [RelatedTitle] = (preferredSource == .trakt || TraktAuthStore.isAuthenticated)
             ? TraktDetailsService.fetchRelated(for: meta)
             : []
         async let simklTask: SimklTitleDetails? = (preferredSource == .simkl || SimklDetailsService.isConfigured)

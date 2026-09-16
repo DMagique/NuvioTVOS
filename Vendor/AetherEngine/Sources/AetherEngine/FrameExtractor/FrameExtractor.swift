@@ -54,16 +54,18 @@ public actor FrameExtractor {
     /// non-disc URLs.
     public init(url: URL, httpHeaders: [String: String] = [:],
                 selectTitleID: Int? = nil,
+                allowsHardwareDecode: Bool = true,
                 yieldWhile: (@Sendable () -> Bool)? = nil) {
-        self.init(context: FrameDecodeContext(url: url, httpHeaders: httpHeaders, selectTitleID: selectTitleID),
+        self.init(context: FrameDecodeContext(url: url, httpHeaders: httpHeaders, selectTitleID: selectTitleID, allowsHardwareDecode: allowsHardwareDecode),
                   yieldWhile: yieldWhile)
     }
 
     /// Construct over a custom `IOReader` source (a clone with its own cursor).
     /// The extractor owns the reader and closes it on teardown.
     public init(reader: IOReader, formatHint: String? = nil,
+                allowsHardwareDecode: Bool = true,
                 yieldWhile: (@Sendable () -> Bool)? = nil) {
-        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint),
+        self.init(context: FrameDecodeContext(reader: reader, formatHint: formatHint, allowsHardwareDecode: allowsHardwareDecode),
                   yieldWhile: yieldWhile)
     }
 
@@ -86,12 +88,33 @@ public actor FrameExtractor {
     // MARK: - Public API
 
     public func thumbnail(at seconds: Double, maxWidth: Int = 320) async -> CGImage? {
-        await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil)
+        await produce(at: seconds, mode: .thumbnail, targetWidth: maxWidth, maxSize: nil,
+                      isElective: true)
     }
 
     public func snapshot(at seconds: Double, maxSize: CGSize? = nil) async -> CGImage? {
         // targetWidth is inert for snapshot; FrameDecodeContext.clampedWidth governs size.
         await produce(at: seconds, mode: .snapshot, targetWidth: 0, maxSize: maxSize)
+    }
+
+    /// Decode a frame-accurate still at thumbnail dimensions. This keeps the snapshot
+    /// decoder's precise timestamp behavior while allowing scrub callers to bound output size.
+    /// The request remains elective, so session-coupled extractors still yield while playback
+    /// is starved, just like `thumbnail(at:maxWidth:)`.
+    public func preciseThumbnail(
+        at seconds: Double,
+        maxWidth: Int = 320,
+        relativeToFirstFrame: Bool = false
+    ) async -> CGImage? {
+        let width = max(1, maxWidth)
+        return await produce(
+            at: seconds,
+            mode: .snapshot,
+            targetWidth: 0,
+            maxSize: CGSize(width: width, height: width),
+            isElective: true,
+            relativeToFirstFrame: relativeToFirstFrame
+        )
     }
 
     /// Open the decode context ahead of the first request to hide cold-start latency
@@ -118,16 +141,23 @@ public actor FrameExtractor {
 
     // MARK: - Core
 
-    private func produce(at seconds: Double, mode: FrameMode, targetWidth: Int, maxSize: CGSize?) async -> CGImage? {
+    private func produce(
+        at seconds: Double,
+        mode: FrameMode,
+        targetWidth: Int,
+        maxSize: CGSize?,
+        isElective: Bool = false,
+        relativeToFirstFrame: Bool = false
+    ) async -> CGImage? {
         guard !isShutDown else { return nil }
         if let hit = cache.get(mode: mode, seconds: seconds) {
             scheduleIdleClose()
             return hit
         }
-        // Elective thumbnails yield to a starved playback pipeline (snapshots are deliberate
-        // one-shot user actions and stay ungated). Checked after the cache: hits are free.
-        if mode == .thumbnail, yieldWhile?() == true {
-            EngineLog.emit("[FrameExtractor] thumbnail yielded: playback pipeline starved",
+        // Elective thumbnail requests yield to a starved playback pipeline. Deliberate snapshots
+        // stay ungated; preciseThumbnail opts into this gate because it serves scrub previews.
+        if isElective, yieldWhile?() == true {
+            EngineLog.emit("[FrameExtractor] elective thumbnail yielded: playback pipeline starved",
                            category: .swPlayback, level: .verbose)
             return nil
         }
@@ -150,7 +180,8 @@ public actor FrameExtractor {
             let image = context.decodeFrame(
                 at: seconds, mode: mode,
                 targetWidth: targetWidth, maxSize: maxSize,
-                isCancelled: { token.isCancelled }
+                isCancelled: { token.isCancelled },
+                relativeToFirstFrame: relativeToFirstFrame
             )
             // Per-miss cost line: correlates extraction bursts with playback stutter
             // (#93 post-recovery lag diagnosis). bytes = link bandwidth this miss consumed.

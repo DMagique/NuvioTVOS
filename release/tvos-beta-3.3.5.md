@@ -26,6 +26,7 @@
 
 ### Playback Engine & Buffering Polish
 
+- **Siri Remote Clickpad Play/Pause:** Pressing the remote clickpad center (circle) now toggles play/pause during playback and resumes from the timeline, matching tvOS native player behavior and enabling seamless Up Arrow navigation into transport/sub-menus.
 - **Smart Buffering Spinner Policy:** Prevents the loading spinner from popping up during brief connection fluctuations when the video buffer is already full and media is actively rendering (`AetherPlaybackController.swift`).
 - **Background Teardown Safety:** Added `BackgroundTeardownSelection.swift` to ensure media resources are cleanly deallocated when exiting playback.
 - **In-Player Audio Delay:** Real-time audio track latency calibration directly from player controls.

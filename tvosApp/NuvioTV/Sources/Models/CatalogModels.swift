@@ -27,6 +27,15 @@ struct NuvioCatalog: Identifiable, Codable {
     let addonName: String?
     /// Required genre extra used for the initial add-on request, if any.
     let catalogGenre: String?
+    /// Preferred poster shape for items in this catalog ("landscape", "square", "poster").
+    let posterShape: String?
+
+    var tileShape: CollectionTileShape {
+        if let posterShape {
+            return CollectionTileShape.fromStored(posterShape, fallback: .poster)
+        }
+        return items?.first(where: { $0.tileShape != .poster })?.tileShape ?? .poster
+    }
 
     init(
         id: String,
@@ -38,7 +47,8 @@ struct NuvioCatalog: Identifiable, Codable {
         catalogId: String? = nil,
         addonId: String? = nil,
         addonName: String? = nil,
-        catalogGenre: String? = nil
+        catalogGenre: String? = nil,
+        posterShape: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -50,6 +60,7 @@ struct NuvioCatalog: Identifiable, Codable {
         self.addonId = addonId
         self.addonName = addonName
         self.catalogGenre = catalogGenre
+        self.posterShape = posterShape
     }
 }
 
@@ -93,6 +104,12 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
     /// This is transient enrichment and is intentionally omitted from compact
     /// library/watch-state snapshots.
     let externalRatings: [NuvioExternalRating]?
+    /// Card shape from add-on metadata ("landscape", "square", "poster").
+    let posterShape: String?
+
+    var tileShape: CollectionTileShape {
+        CollectionTileShape.fromStored(posterShape, fallback: .poster)
+    }
 
     static func isSeriesType(_ type: String) -> Bool {
         let normalized = type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -171,7 +188,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: nil,
             trailerYtIds: trailerYtIds,
-            externalRatings: nil
+            externalRatings: nil,
+            posterShape: posterShape
         )
     }
 
@@ -244,7 +262,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: resolvedStatus,
             videos: videos,
             trailerYtIds: trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape ?? fullMeta.posterShape
         )
     }
 
@@ -287,7 +306,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             // after background enrichment, without another metadata fetch.
             videos: videos ?? fullMeta.videos,
             trailerYtIds: trailerYtIds ?? fullMeta.trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape ?? fullMeta.posterShape
         )
     }
 
@@ -316,7 +336,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: videos,
             trailerYtIds: trailerYtIds,
-            externalRatings: ratings.isEmpty ? nil : ratings
+            externalRatings: ratings.isEmpty ? nil : ratings,
+            posterShape: posterShape
         )
     }
 
@@ -348,35 +369,37 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: videosToUse,
             trailerYtIds: trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape
         )
     }
 
     init(
         id: String,
         name: String,
-        description: String?,
-        posterUrl: String?,
-        backgroundUrl: String?,
-        logoUrl: String?,
-        imdbId: String?,
-        tmdbId: Int?,
+        description: String? = nil,
+        posterUrl: String? = nil,
+        backgroundUrl: String? = nil,
+        logoUrl: String? = nil,
+        imdbId: String? = nil,
+        tmdbId: Int? = nil,
         type: String,
-        year: Int?,
-        genres: [String]?,
-        rating: Double?,
-        releaseInfo: String?,
-        runtime: String?,
-        cast: [String]?,
-        director: [String]?,
-        writer: [String]?,
-        certification: String?,
-        country: String?,
-        released: String?,
+        year: Int? = nil,
+        genres: [String]? = nil,
+        rating: Double? = nil,
+        releaseInfo: String? = nil,
+        runtime: String? = nil,
+        cast: [String]? = nil,
+        director: [String]? = nil,
+        writer: [String]? = nil,
+        certification: String? = nil,
+        country: String? = nil,
+        released: String? = nil,
         status: String? = nil,
         videos: [NuvioVideo]? = nil,
         trailerYtIds: [String]? = nil,
-        externalRatings: [NuvioExternalRating]? = nil
+        externalRatings: [NuvioExternalRating]? = nil,
+        posterShape: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -402,6 +425,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
         self.videos = videos
         self.trailerYtIds = trailerYtIds
         self.externalRatings = externalRatings
+        self.posterShape = posterShape
     }
 }
 
@@ -861,6 +885,8 @@ struct NuvioStream: Identifiable, Codable {
     /// `behaviorHints.proxyHeaders.request`. Some hosts reject playback without
     /// the add-on's Referer or User-Agent.
     let httpHeaders: [String: String]?
+    /// Direct storyboard/trickplay manifest URL (WebVTT) when supplied by the stream add-on.
+    let trickplayURL: URL?
 
     init(
         url: String?,
@@ -876,7 +902,8 @@ struct NuvioStream: Identifiable, Codable {
         videoSize: Int64? = nil,
         bingeGroup: String? = nil,
         isCached: Bool? = nil,
-        httpHeaders: [String: String]? = nil
+        httpHeaders: [String: String]? = nil,
+        trickplayURL: URL? = nil
     ) {
         let parsed = TorrentSourceParser.parse(
             url: url,
@@ -897,6 +924,7 @@ struct NuvioStream: Identifiable, Codable {
         self.bingeGroup = bingeGroup
         self.isCached = isCached
         self.httpHeaders = httpHeaders
+        self.trickplayURL = trickplayURL
     }
 
     /// The direct HTTP URL, if this stream is not a magnet/torrent transport.
@@ -1085,7 +1113,7 @@ enum ContinueWatchingFeatureFlags {
     static let nextUpCardsEnabled = true
 }
 
-struct ContinueWatchingItem: Identifiable, Codable {
+struct ContinueWatchingItem: Identifiable, Codable, Equatable {
     var id: String { meta.id }
     let meta: NuvioMeta
     let streamUrl: String
@@ -1414,6 +1442,10 @@ struct ContinueWatchingItem: Identifiable, Codable {
             && episodeOverviewOverride == other.episodeOverviewOverride
             && episodeThumbnailOverride == other.episodeThumbnailOverride
             && upNextSeedSeason == other.upNextSeedSeason
+    }
+
+    static func == (lhs: ContinueWatchingItem, rhs: ContinueWatchingItem) -> Bool {
+        lhs.isContentEqual(to: rhs)
     }
 }
 
@@ -3029,7 +3061,7 @@ struct NuvioCollection: Decodable, Identifiable, Equatable {
 }
 
 /// Folder card aspect on Home — mirrors Android `PosterShape` / `tileShape`.
-enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
+enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable, Codable {
     case poster = "POSTER"
     case landscape = "LANDSCAPE"
     case square = "SQUARE"
@@ -3053,8 +3085,8 @@ enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    static func fromStored(_ value: String?) -> CollectionTileShape {
-        guard let value else { return .square }
+    static func fromStored(_ value: String?, fallback: CollectionTileShape = .poster) -> CollectionTileShape {
+        guard let value else { return fallback }
         switch value.uppercased() {
         case "POSTER": return .poster
         case "LANDSCAPE": return .landscape
@@ -3064,7 +3096,7 @@ enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
             case "poster": return .poster
             case "landscape": return .landscape
             case "square": return .square
-            default: return .square
+            default: return fallback
             }
         }
     }
@@ -3126,7 +3158,7 @@ struct NuvioCollectionFolder: Decodable, Identifiable, Equatable {
             ?? c.decodeIfPresent(String.self, forKey: .presentation_style)
         let shapeRaw = try c.decodeIfPresent(String.self, forKey: .tileShape)
             ?? c.decodeIfPresent(String.self, forKey: .tile_shape)
-        tileShape = CollectionTileShape.fromStored(shapeRaw)
+        tileShape = CollectionTileShape.fromStored(shapeRaw, fallback: .square)
         sources = try c.decodeIfPresent([NuvioCollectionSource].self, forKey: .sources) ?? []
         catalogSources = try c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalogSources)
             ?? c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalog_sources)
@@ -6151,7 +6183,31 @@ enum WatchedStore {
 enum ProfileSettings {
     private static let suitePrefix = "nuvio.tv.profile.settings"
     private static let seededFlag = "nuvio.tv.profile.settings.seeded"
+    private static let profileScopeKey = "nuvio.tv.profile.settings.profileID"
+    private static let primaryProfileKey = "nuvio.tv.profile.settings.isPrimary"
+    private static let traktIsolationMigrationKey = "nuvio.tv.profile.settings.traktIsolation.v1"
+    private static let simklIsolationMigrationKey = "nuvio.tv.profile.settings.simklIsolation.v1"
+    private static let mdbListIsolationMigrationKey = "nuvio.tv.profile.settings.mdbListIsolation.v1"
     static let settingsChangedNotification = Notification.Name("nuvio.tv.profile.settings.changed")
+
+    /// Values identifying connected external tracking/metadata accounts on the device.
+    /// They are deliberately not copied when a new profile is created: a profile
+    /// must connect its own accounts explicitly.
+    private static let profileLocalIntegrationKeys: Set<String> = [
+        // Trakt
+        SettingsKey.traktConnected,
+        SettingsKey.traktClientID,
+        SettingsKey.traktClientSecret,
+        // Simkl
+        SettingsKey.simklClientID,
+        SettingsKey.simklAccessToken,
+        SettingsKey.simklPlanToWatchHomeCatalogs,
+        // MDBList
+        SettingsKey.mdbListApiKey,
+        SettingsKey.mdbListEnabled
+    ]
+
+    private static var profileLocalTraktKeys: Set<String> { profileLocalIntegrationKeys }
 
     static func notifySettingsChanged() {
         if Thread.isMainThread {
@@ -6181,19 +6237,27 @@ enum ProfileSettings {
               let suite = UserDefaults(suiteName: "\(suitePrefix).\(id)") else {
             return .standard
         }
+        // Keep the suite self-identifying so asynchronous provider work can
+        // verify that its captured store still belongs to the active profile.
+        suite.set(id, forKey: profileScopeKey)
         return suite
     }
 
     /// Point reads/writes at a profile. Called on launch and on every switch.
     /// Seeds the profile from the pre-profile global settings the first time it
     /// is used so existing installs keep their preferences.
-    static func setActiveProfile(_ profileId: String?) {
+    static func setActiveProfile(_ profileId: String?, isPrimary: Bool? = nil) {
         guard let id = profileId, !id.isEmpty else { return }
         let suite = store(for: id)
+        let primary = isPrimary ?? (id == "1")
         let needsSeed = !suite.bool(forKey: seededFlag)
-        seedFromGlobalIfNeeded(suite)
+        seedFromGlobalIfNeeded(suite, isPrimary: primary)
         current = suite
         activeProfileID = id
+        suite.set(primary, forKey: primaryProfileKey)
+        migrateTraktIsolationIfNeeded(in: suite, isPrimary: primary)
+        migrateSimklIsolationIfNeeded(in: suite, profileScope: id, isPrimary: primary)
+        migrateMdbListIsolationIfNeeded(in: suite, profileScope: id, isPrimary: primary)
         AISubtitleKeyStore.migrateLegacyKey(from: suite, profileScope: id)
         if needsSeed {
             AISubtitleKeyStore.migrateLegacyKey(from: .standard, profileScope: id)
@@ -6207,6 +6271,28 @@ enum ProfileSettings {
     static func clearActiveProfile() {
         current = .standard
         activeProfileID = nil
+    }
+
+    /// Returns whether a captured settings store still belongs to the active
+    /// profile. Provider requests use this before and after suspension points
+    /// so a late completion cannot write through the previous profile's link.
+    static func isActiveStore(_ store: UserDefaults) -> Bool {
+        if let scope = store.string(forKey: profileScopeKey) {
+            guard let activeProfileID else { return false }
+            return scope == activeProfileID
+        }
+        guard let activeProfileID else { return true }
+        return store === current || store === UserDefaults.standard
+    }
+
+    /// Whether this store represents the account's primary profile. This is
+    /// used only to migrate legacy auth state; secondary profiles may still
+    /// connect their own Trakt account explicitly.
+    static func isPrimaryProfileStore(_ store: UserDefaults) -> Bool {
+        if let value = store.object(forKey: primaryProfileKey) as? Bool {
+            return value
+        }
+        return store.string(forKey: profileScopeKey) == "1"
     }
 
     /// Deletes the given profiles' settings suites and the pre-profile copies
@@ -6254,29 +6340,123 @@ enum ProfileSettings {
     /// mark it seeded so the global migration never overwrites the copy.
     static func seedNewProfile(_ profileId: String, copyingFrom source: UserDefaults? = nil) {
         let destination = store(for: profileId)
-        copySettings(from: source ?? current, to: destination)
+        copySettings(from: source ?? current, to: destination, includeProfileLocalIntegrationSettings: false)
+        clearTraktProfileState(in: destination)
+        clearSimklProfileState(in: destination, profileScope: profileId)
+        clearMdbListProfileState(in: destination, profileScope: profileId)
         // Secrets never cross profile boundaries. Keep AI translation disabled
         // until this profile explicitly supplies its own Keychain credential.
         destination.set(false, forKey: SettingsKey.aiSubtitlesEnabled)
         destination.removeObject(forKey: SettingsKey.aiSubtitlesGeminiAPIKey)
         destination.set(true, forKey: seededFlag)
+        destination.set(false, forKey: primaryProfileKey)
+        destination.set(true, forKey: traktIsolationMigrationKey)
+        destination.set(true, forKey: simklIsolationMigrationKey)
+        destination.set(true, forKey: mdbListIsolationMigrationKey)
     }
 
-    private static func seedFromGlobalIfNeeded(_ suite: UserDefaults) {
+    private static func seedFromGlobalIfNeeded(_ suite: UserDefaults, isPrimary: Bool) {
         guard !suite.bool(forKey: seededFlag) else { return }
-        copySettings(from: .standard, to: suite)
+        copySettings(
+            from: .standard,
+            to: suite,
+            includeProfileLocalIntegrationSettings: isPrimary
+        )
         suite.set(true, forKey: seededFlag)
     }
 
-    private static func copySettings(from source: UserDefaults, to destination: UserDefaults) {
+    private static func copySettings(
+        from source: UserDefaults,
+        to destination: UserDefaults,
+        includeProfileLocalIntegrationSettings: Bool = false
+    ) {
         guard source != destination else { return }
-        for key in SettingsKey.all where key != SettingsKey.aiSubtitlesGeminiAPIKey {
+        for key in SettingsKey.all
+            where key != SettingsKey.aiSubtitlesGeminiAPIKey
+                && (includeProfileLocalIntegrationSettings || !profileLocalIntegrationKeys.contains(key)) {
             if let value = source.object(forKey: key) {
                 destination.set(value, forKey: key)
             } else {
                 destination.removeObject(forKey: key)
             }
         }
+    }
+
+    /// One-time cleanup for profiles created before Trakt credentials and the
+    /// connection marker were treated as profile-local. A primary profile keeps
+    /// its legacy login; a secondary profile must explicitly reconnect.
+    private static func migrateTraktIsolationIfNeeded(
+        in store: UserDefaults,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: traktIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearTraktProfileState(in: store)
+        }
+        store.set(true, forKey: traktIsolationMigrationKey)
+    }
+
+    private static func clearTraktProfileState(in store: UserDefaults) {
+        [
+            SettingsKey.traktConnected,
+            SettingsKey.traktClientID,
+            SettingsKey.traktClientSecret
+        ].forEach { store.removeObject(forKey: $0) }
+        store.removeObject(forKey: SettingsKey.traktWatchProgressSource)
+        store.removeObject(forKey: SettingsKey.watchProgressSourceChosenByUser)
+        store.removeObject(forKey: SettingsKey.traktLibrarySourceMode)
+        store.removeObject(forKey: SettingsKey.traktMoreLikeThisSource)
+        TraktAuthStore.clearAuth(store: store)
+    }
+
+    private static func migrateSimklIsolationIfNeeded(
+        in store: UserDefaults,
+        profileScope: String,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: simklIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearSimklProfileState(in: store, profileScope: profileScope)
+        }
+        store.set(true, forKey: simklIsolationMigrationKey)
+    }
+
+    private static func clearSimklProfileState(in store: UserDefaults, profileScope: String) {
+        store.removeObject(forKey: SettingsKey.simklAccessToken)
+        store.removeObject(forKey: SettingsKey.simklClientID)
+        store.removeObject(forKey: SettingsKey.simklPlanToWatchHomeCatalogs)
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: SimklKeychainTokenStorage()
+        )
+        RemoteTrackingState.normalizeWatchProgressSource(in: store)
+        RemoteTrackingState.normalizeLibrarySource(in: store)
+        RemoteTrackingState.normalizeMoreLikeThisSource(in: store)
+    }
+
+    private static func migrateMdbListIsolationIfNeeded(
+        in store: UserDefaults,
+        profileScope: String,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: mdbListIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearMdbListProfileState(in: store, profileScope: profileScope)
+        }
+        store.set(true, forKey: mdbListIsolationMigrationKey)
+    }
+
+    private static func clearMdbListProfileState(in store: UserDefaults, profileScope: String) {
+        store.removeObject(forKey: SettingsKey.mdbListApiKey)
+        store.removeObject(forKey: SettingsKey.mdbListEnabled)
+        MdbListAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: MdbListKeychainTokenStorage()
+        )
+        RemoteTrackingState.normalizeWatchProgressSource(in: store)
+        RemoteTrackingState.normalizeLibrarySource(in: store)
     }
 }
 

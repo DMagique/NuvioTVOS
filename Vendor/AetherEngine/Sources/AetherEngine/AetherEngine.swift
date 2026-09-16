@@ -4443,7 +4443,8 @@ public final class AetherEngine: ObservableObject {
                 url: placeholderURL,
                 audioStreamIndex: selection.audioTrackIndex.map { Int32($0) },
                 expectedGeneration: loadGeneration,
-                discTitleIDOverride: selection.discTitleID
+                discTitleIDOverride: selection.discTitleID,
+                resumeOverride: selection.resumePosition
             )
             // AE#460 follow-up: a rebuild that died leaves the session in `.error`, and this branch
             // used to return as if it had come back, so `reloadAtCurrentPosition(applying:)`
@@ -4462,7 +4463,9 @@ public final class AetherEngine: ObservableObject {
         guard let url = loadedURL else { return }
         // AE#464 round 2: not `currentTime`. A reload stacked behind one still in flight reads a clock
         // that load already zeroed, and rebuilds the session at its head. See `rebuildPosition`.
-        let pos = positionForSessionRebuild
+        // A background teardown has an even longer gap: use the playhead captured before stopInternal
+        // removed the active item, because the host may publish zero while the app is suspended.
+        let pos = selection.resumePosition ?? positionForSessionRebuild
         // Snapshot the disc title before load()'s stopInternal wipes it, so a background-resumed disc image
         // keeps the title the user selected instead of reverting to the main title (#67).
         let titleID = selection.discTitleID
@@ -6388,12 +6391,13 @@ public final class AetherEngine: ObservableObject {
                     let backgroundSafe = !self.isBackgrounded
                         || self.audioAVPlayerActive || self.audioHost != nil || self.softwareHost != nil
                     #else
-                    let backgroundSafe = true
+                    let backgroundSafe = !self.isBackgrounded
+                        && UIApplication.shared.applicationState == .active
                     #endif
                     let firing = self.resumeAfterInterruption && backgroundSafe && shouldResume
+                    self.resumeAfterInterruption = false
                     EngineLog.emit("[AetherEngine] AVAudioSession interruption ENDED shouldResume=\(shouldResume) otherAudio=\(session.isOtherAudioPlaying) resumeArmed=\(self.resumeAfterInterruption) autoResume=\(firing)", category: .engine)
                     if firing {
-                        self.resumeAfterInterruption = false
                         self.play()
                     }
                 }

@@ -34,6 +34,14 @@ final class NuvioSyncManager: ObservableObject {
         NuvioAPIClient.mergeHomeCatalogItems(local: local, remote: remote)
     }
 
+    @discardableResult
+    nonisolated static func applyHomeCatalogSettings(
+        _ payload: HomeCatalogSyncPayload,
+        localProfileId: String
+    ) -> Bool {
+        NuvioAPIClient().applyHomeCatalogSettings(payload, localProfileId: localProfileId)
+    }
+
     /// True from sign-in until the first profile pull has been applied (or the
     /// pull fails), so the who's-watching screen can wait for real profile
     /// names instead of rendering local stubs.
@@ -902,7 +910,7 @@ final class NuvioSyncManager: ObservableObject {
 
     /// One wording for the state where the account is still configured on this
     /// Apple TV but its session can no longer be renewed.
-    static let reauthenticationMessage =
+    nonisolated static let reauthenticationMessage =
         "Your Nuvio session expired. Sign in again to resume syncing."
 
     private func pullThenPush(generation: UInt) async {
@@ -1486,7 +1494,7 @@ final class NuvioSyncManager: ObservableObject {
         case .nuvioSync:
             return true
         case .trakt:
-            return !TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return !TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
             return !SimklAuthStore.state(in: store, profileScope: profileId).isAuthenticated(in: store)
         case .mdblist:
@@ -1509,7 +1517,7 @@ final class NuvioSyncManager: ObservableObject {
         case .local:
             return true
         case .trakt:
-            return !TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return !TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
             return !SimklAuthStore.state(in: store, profileScope: profileId).isAuthenticated(in: store)
         case .mdblist:
@@ -1908,6 +1916,8 @@ enum PlayerSettingsSyncMapper {
         ("subtitle_use_forced_subtitles", SettingsKey.forcedSubtitles),
         ("stream_auto_play_next_episode_enabled", SettingsKey.autoPlayNext),
         ("stream_auto_play_timeout_seconds", SettingsKey.autoPlayNextCountdown),
+        ("stream_auto_play_prefer_binge_group", SettingsKey.streamAutoPlayPreferBingeGroup),
+        ("stream_auto_play_reuse_binge_group", SettingsKey.streamAutoPlayReuseBingeGroup),
         ("stream_cached_only", SettingsKey.cachedOnlyStreams),
         ("cached_only_streams", SettingsKey.cachedOnlyStreams),
         ("stream_sort_mode", SettingsKey.streamSortOption),
@@ -1919,7 +1929,8 @@ enum PlayerSettingsSyncMapper {
         ("player_show_pip", SettingsKey.playerShowPiP),
         ("player_show_episodes", SettingsKey.playerShowEpisodes),
         ("player_show_sources", SettingsKey.playerShowSources),
-        ("player_show_subtitles", SettingsKey.playerShowSubtitles)
+        ("player_show_subtitles", SettingsKey.playerShowSubtitles),
+        ("seek_preview_enabled", SettingsKey.seekPreviewEnabled)
     ]
 
     static let localToRemoteKeyMappings: [(local: String, remote: String)] = [
@@ -1929,6 +1940,8 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.forcedSubtitles, "subtitle_use_forced_subtitles"),
         (SettingsKey.autoPlayNext, "stream_auto_play_next_episode_enabled"),
         (SettingsKey.autoPlayNextCountdown, "stream_auto_play_timeout_seconds"),
+        (SettingsKey.streamAutoPlayPreferBingeGroup, "stream_auto_play_prefer_binge_group"),
+        (SettingsKey.streamAutoPlayReuseBingeGroup, "stream_auto_play_reuse_binge_group"),
         (SettingsKey.cachedOnlyStreams, "stream_cached_only"),
         (SettingsKey.streamSortOption, "stream_sort_mode"),
         (SettingsKey.smartStreamSelection, "smart_stream_selection"),
@@ -1939,7 +1952,8 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.playerShowPiP, "player_show_pip"),
         (SettingsKey.playerShowEpisodes, "player_show_episodes"),
         (SettingsKey.playerShowSources, "player_show_sources"),
-        (SettingsKey.playerShowSubtitles, "player_show_subtitles")
+        (SettingsKey.playerShowSubtitles, "player_show_subtitles"),
+        (SettingsKey.seekPreviewEnabled, "seek_preview_enabled")
     ]
 
     static func exportPayload(
@@ -2361,6 +2375,9 @@ fileprivate final class NuvioAPIClient {
         let didChange = currentPreferences != preferences
         if didChange {
             CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults)
+            Task {
+                await StremioManifestDataCache.shared.clear()
+            }
         }
         return (preferences.filter(\.enabled).count, didChange)
     }
@@ -2512,26 +2529,40 @@ fileprivate final class NuvioAPIClient {
             .map(\.collectionId)
             .filter { !$0.isEmpty }
 
+        var customTitles: [String: String] = [:]
+        for item in catalogItems where !item.customTitle.isEmpty {
+            let key = "\(item.addonId)_\(item.type)_\(item.catalogId)"
+            customTitles[key] = item.customTitle
+        }
+        for item in collectionItems where !item.customTitle.isEmpty {
+            let key = "collection_\(item.collectionId)"
+            customTitles[key] = item.customTitle
+        }
+
         let defaults = ProfileSettings.store(for: localProfileId)
         let currentOrderData = defaults.data(forKey: SettingsKey.homeCatalogSyncedOrder)
         let currentDisabledData = defaults.data(forKey: SettingsKey.homeCatalogDisabled)
         let currentDisabledColData = defaults.data(forKey: SettingsKey.homeCollectionDisabled)
+        let currentCustomTitlesData = defaults.data(forKey: SettingsKey.homeCatalogCustomTitles)
         let currentShowType = defaults.object(forKey: SettingsKey.homeCatalogShowType) as? Bool
 
         let newOrderData = try? JSONEncoder().encode(orderKeys)
         let newDisabledData = try? JSONEncoder().encode(disabledKeys)
         let newDisabledColData = try? JSONEncoder().encode(disabledCollectionIds)
+        let newCustomTitlesData = try? JSONEncoder().encode(customTitles)
         let newShowType = payload.showCatalogType
 
         let didChange = (currentOrderData != newOrderData)
             || (currentDisabledData != newDisabledData)
             || (currentDisabledColData != newDisabledColData)
+            || (currentCustomTitlesData != newCustomTitlesData)
             || (currentShowType ?? true) != newShowType
 
         if didChange {
             if let newOrderData { defaults.set(newOrderData, forKey: SettingsKey.homeCatalogSyncedOrder) }
             if let newDisabledData { defaults.set(newDisabledData, forKey: SettingsKey.homeCatalogDisabled) }
             if let newDisabledColData { defaults.set(newDisabledColData, forKey: SettingsKey.homeCollectionDisabled) }
+            if let newCustomTitlesData { defaults.set(newCustomTitlesData, forKey: SettingsKey.homeCatalogCustomTitles) }
             defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
         }
         return didChange
@@ -3889,6 +3920,7 @@ struct HomeCatalogSyncItem {
     let addonId: String
     let type: String
     let catalogId: String
+    let customTitle: String
     let enabled: Bool
     let order: Int
     let isCollection: Bool
@@ -3898,6 +3930,7 @@ struct HomeCatalogSyncItem {
         self.addonId = dictionary["addon_id"] as? String ?? ""
         self.type = dictionary["type"] as? String ?? ""
         self.catalogId = dictionary["catalog_id"] as? String ?? ""
+        self.customTitle = (dictionary["custom_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.enabled = Self.boolValue(dictionary["enabled"], default: true)
         self.order = (dictionary["order"] as? NSNumber)?.intValue
             ?? (dictionary["order"] as? Int)

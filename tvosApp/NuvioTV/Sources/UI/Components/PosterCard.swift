@@ -142,12 +142,36 @@ enum AppCardStyle {
         case .pill: return base * 1.8
         }
     }
+
+    /// Computes the aspect-ratio-aware bounding box for seek preview cards,
+    /// ensuring widescreen (2.39:1) and classic (4:3) content fit within maxWidth × maxHeight
+    /// without edge cropping or vertical distortion.
+    static func seekCardSize(
+        for naturalSize: CGSize,
+        maxWidth: CGFloat = 480,
+        maxHeight: CGFloat = 270
+    ) -> CGSize {
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return CGSize(width: maxWidth, height: maxHeight)
+        }
+        let aspect = naturalSize.width / naturalSize.height
+        let targetAspect = maxWidth / maxHeight
+        if aspect >= targetAspect {
+            // Wider than 16:9 (e.g. 2.39:1) -> fit to width, scale height down
+            return CGSize(width: maxWidth, height: max(1, round(maxWidth / aspect)))
+        } else {
+            // Taller than 16:9 (e.g. 4:3) -> fit to height, scale width down
+            return CGSize(width: max(1, round(maxHeight * aspect)), height: maxHeight)
+        }
+    }
 }
 
 /// Poster card component with focus animation (tvOS) and tap handling (iOS)
 struct PosterCard: View {
     let meta: NuvioMeta
     var isLandscape: Bool = false
+    var isAlwaysLandscape: Bool = false
+    var tileShape: CollectionTileShape = .poster
     var continueProgress: Double? = nil
     var continueRemainingText: String? = nil
     var continueEpisodeText: String? = nil
@@ -188,6 +212,7 @@ struct PosterCard: View {
     /// Lets Home retain off-window artwork without leaving every card in the
     /// tvOS focus graph.
     var allowsFocus: Bool = true
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
     var isWatched: Bool? = nil
     let onClick: () -> Void
 
@@ -223,6 +248,7 @@ struct PosterCard: View {
         .focused($isFocused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? meta.id))
         .nuvioFocusEffectDisabledIfAvailable()
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
         .titleActionsContextMenu(
             meta: meta,
             onOpenDetails: onOpenDetails ?? onClick,
@@ -312,7 +338,7 @@ struct PosterCard: View {
             onStartFromBeginning: onStartFromBeginning,
             onRemoveFromContinueWatching: onRemoveFromContinueWatching
         )
-        .frame(width: cardWidth, height: totalCardHeight, alignment: .topLeading)
+        .frame(width: layoutWidth, height: totalCardHeight, alignment: .topLeading)
         #endif
     }
 
@@ -420,44 +446,48 @@ struct PosterCard: View {
 
     @ViewBuilder
     private var landscapeOverlay: some View {
-        ZStack(alignment: .bottomLeading) {
-            if liquidGlassCards {
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .black.opacity(0.38), location: 0.35),
-                        .init(color: .black.opacity(0.85), location: 0.85),
-                        .init(color: .black.opacity(0.95), location: 1.0)
-                    ],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
-            } else {
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.78)],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
-            }
-
-            if continueEpisodeText != nil {
-                continueLandscapeSummary
-            } else if let logoURL = landscapeLogoURL {
-                AsyncImage(url: logoURL) { phase in
-                    if case .success(let image) = phase {
-                        image
-                            .resizable()
-                            .scaledToFit()
+        if shouldShowLandscapeOverlay {
+            ZStack(alignment: .bottomLeading) {
+                if shouldShowLandscapeGradient {
+                    if liquidGlassCards {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.0),
+                                .init(color: .black.opacity(0.38), location: 0.35),
+                                .init(color: .black.opacity(0.85), location: 0.85),
+                                .init(color: .black.opacity(0.95), location: 1.0)
+                            ],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
                     } else {
-                        fallbackTitle
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.78)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
                     }
                 }
-                .frame(width: landscapeLogoWidth, height: landscapeLogoHeight, alignment: .leading)
-                .padding(22)
-            } else {
-                fallbackTitle
-                    .frame(maxWidth: cardWidth * 0.62, alignment: .leading)
+
+                if continueEpisodeText != nil {
+                    continueLandscapeSummary
+                } else if let logoURL = landscapeLogoURL {
+                    AsyncImage(url: logoURL) { phase in
+                        if case .success(let image) = phase {
+                            image
+                                .resizable()
+                                .scaledToFit()
+                        } else {
+                            fallbackTitle
+                        }
+                    }
+                    .frame(width: landscapeLogoWidth, height: landscapeLogoHeight, alignment: .leading)
                     .padding(22)
+                } else if !isEffectivelyAlwaysLandscape || !showsPosterTitle {
+                    fallbackTitle
+                        .frame(maxWidth: cardWidth * 0.62, alignment: .leading)
+                        .padding(22)
+                }
             }
         }
     }
@@ -609,28 +639,53 @@ struct PosterCard: View {
         focusHighlighterEnabled
     }
 
+    private var isEffectivelyAlwaysLandscape: Bool {
+        isAlwaysLandscape || tileShape == .landscape || meta.tileShape == .landscape
+    }
+
+    private var shouldShowLandscapeOverlay: Bool {
+        if isContinueOrUpcomingCard { return true }
+        if isEffectivelyAlwaysLandscape {
+            return landscapeLogoURL != nil || !showsPosterTitle
+        }
+        return true
+    }
+
+    private var shouldShowLandscapeGradient: Bool {
+        if isContinueOrUpcomingCard { return true }
+        if isEffectivelyAlwaysLandscape {
+            return landscapeLogoURL != nil || !showsPosterTitle
+        }
+        return true
+    }
+
     private var effectiveLandscape: Bool {
-        isLandscape && (landscapeArtworkPrepared || landscapeArtworkURL == nil)
+        if isEffectivelyAlwaysLandscape { return true }
+        return isLandscape && (landscapeArtworkPrepared || landscapeArtworkURL == nil)
     }
 
     private var cardWidth: CGFloat {
         if effectiveLandscape {
-            return 560
+            return effectiveHomeLayout == "Compact" ? 454 : 560
+        }
+        if tileShape == .square || meta.tileShape == .square {
+            return effectiveHomeLayout == "Compact" ? 255 : 315
         }
         return effectiveHomeLayout == "Compact" ? 170 : 210
     }
 
     /// Width the card occupies in the row layout — and therefore its focus
-    /// frame. Always the portrait width, even while the landscape art is shown,
-    /// so a focused landscape card does NOT widen its focus region and bump
-    /// vertical navigation onto the neighbouring column. The 560pt landscape art
-    /// overflows this frame to the right and is drawn above siblings (zIndex).
+    /// frame. Always the portrait width for dynamic expansion, but full width
+    /// for always-landscape / square items.
     private var layoutWidth: CGFloat {
-        effectiveHomeLayout == "Compact" ? 170 : 210
+        if isEffectivelyAlwaysLandscape || tileShape == .square || meta.tileShape == .square {
+            return cardWidth
+        }
+        return effectiveHomeLayout == "Compact" ? 170 : 210
     }
 
     private var cardHeight: CGFloat {
-        effectiveLandscape ? 315 : (effectiveHomeLayout == "Compact" ? 255 : 315)
+        effectiveHomeLayout == "Compact" ? 255 : 315
     }
 
     private var totalCardHeight: CGFloat {
@@ -654,23 +709,29 @@ struct PosterCard: View {
            let continueEpisodeArtworkURL, !continueEpisodeArtworkURL.isEmpty {
             return continueEpisodeArtworkURL
         }
+        if isEffectivelyAlwaysLandscape {
+            return meta.posterUrl ?? meta.backgroundUrl
+        }
         return meta.backgroundUrl ?? meta.posterUrl
     }
 
     private var imageUrl: String? {
-        effectiveLandscape ? landscapeArtworkURL : meta.posterUrl
+        if isEffectivelyAlwaysLandscape {
+            return meta.posterUrl ?? landscapeArtworkURL
+        }
+        return effectiveLandscape ? landscapeArtworkURL : meta.posterUrl
     }
 
     private var landscapePreloadURL: String? {
-        landscapePreloadArmed || isLandscape ? landscapeArtworkURL : nil
+        landscapePreloadArmed || isLandscape || isEffectivelyAlwaysLandscape ? landscapeArtworkURL : nil
     }
 
     private var artworkDecodeWidth: CGFloat {
-        effectiveLandscape ? 560 : cardWidth
+        effectiveLandscape ? (effectiveHomeLayout == "Compact" ? 454 : 560) : cardWidth
     }
 
     private var landscapeArtworkDecodeWidth: CGFloat {
-        560
+        effectiveHomeLayout == "Compact" ? 454 : 560
     }
 
     private var focusedBorderColor: Color {
@@ -1228,7 +1289,7 @@ struct PosterGridCard: View {
     }
 }
 
-private struct OptionalMoveCommandHandler: ViewModifier {
+struct OptionalMoveCommandHandler: ViewModifier {
     let handler: ((MoveCommandDirection) -> Void)?
 
     @ViewBuilder
@@ -1419,7 +1480,12 @@ struct LoadingPosterCard: View {
     let width: CGFloat
     let height: CGFloat
     var cornerRadius: CGFloat = 16
+    var isFocused: Bool = false
     var isLiquidGlassEnabled: Bool = true
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
 
     var body: some View {
         ZStack {
@@ -1430,11 +1496,27 @@ struct LoadingPosterCard: View {
                 .tint(.white.opacity(0.55))
         }
         .frame(width: width, height: height)
+        .background {
+            if !isLiquidGlassEnabled {
+                shape
+                    .fill(Color.white.opacity(isFocused ? 0.14 : 0.07))
+            }
+        }
+        .overlay {
+            if !isLiquidGlassEnabled {
+                shape
+                    .strokeBorder(
+                        isFocused ? AppFocusOutline.color : Color.white.opacity(0.14),
+                        lineWidth: isFocused ? AppFocusOutline.width : 1
+                    )
+            }
+        }
         .modifier(LiquidGlassCardModifier(
             cornerRadius: cornerRadius,
+            isFocused: isFocused,
             isEnabled: isLiquidGlassEnabled
         ))
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .clipShape(shape)
     }
 }
 

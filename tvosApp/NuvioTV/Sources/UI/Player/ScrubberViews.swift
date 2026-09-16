@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreGraphics
 
 // MARK: - Progress track
 
@@ -110,6 +111,9 @@ enum WatchClock {
 struct SeekHUD: View {
     @ObservedObject var clock: PlaybackClock
     let delta: Double
+    var thumbnail: CGImage?
+    var naturalSize: CGSize = CGSize(width: 16, height: 9)
+    var speedMultiplier: Int? = nil
 
     private var position: Double { clock.position }
     private var duration: Double { clock.duration }
@@ -122,10 +126,26 @@ struct SeekHUD: View {
         VStack {
             Spacer()
             VStack(spacing: 22) {
+                if let thumbnail {
+                    SeekPreviewCard(image: thumbnail, naturalSize: naturalSize)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                }
+
                 HStack(spacing: 16) {
                     Image(systemName: delta >= 0 ? "forward.fill" : "backward.fill")
                         .font(.system(size: 34, weight: .bold))
                         .foregroundStyle(.white.opacity(0.9))
+                    if let speedMultiplier {
+                        Text("\(speedMultiplier)x")
+                            .font(.system(size: 26, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(
+                                Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 1)
+                            )
+                    }
                     Text(PlayerTimeFormat.signedDelta(delta))
                         .font(.system(size: 44, weight: .heavy).monospacedDigit())
                         .foregroundStyle(.white)
@@ -145,7 +165,7 @@ struct SeekHUD: View {
                         Text(PlayerTimeFormat.clock(target))
                             .font(.system(size: 26, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
-                        Text("elapsed")
+                        Text(L10n.string("player_time_elapsed", fallback: "elapsed"))
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(.white.opacity(0.55))
                     }
@@ -158,7 +178,7 @@ struct SeekHUD: View {
                         Text("-\(PlayerTimeFormat.clock(max(duration - target, 0)))")
                             .font(.system(size: 26, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
-                        Text("remaining")
+                        Text(L10n.string("player_time_remaining", fallback: "remaining"))
                             .font(.system(size: 17, weight: .medium))
                             .foregroundStyle(.white.opacity(0.55))
                     }
@@ -167,13 +187,59 @@ struct SeekHUD: View {
             .padding(.horizontal, 60)
             .padding(.bottom, 54)
             .background(
-                LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
-                    .frame(height: 320)
+                LinearGradient(colors: [.clear, .black.opacity(0.88)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 560)
                     .frame(maxHeight: .infinity, alignment: .bottom)
                     .ignoresSafeArea()
             )
+            .animation(.easeOut(duration: 0.18), value: thumbnail != nil)
         }
         .allowsHitTesting(false)
+    }
+}
+
+/// Shared still card used by seek HUDs. Its radius follows the
+/// same profile setting as poster and episode cards, and adapts to the
+/// stream's natural aspect ratio within standard bounds.
+struct SeekPreviewCard: View {
+    let image: CGImage?
+    var width: CGFloat = 480
+    var naturalSize: CGSize = CGSize(width: 16, height: 9)
+
+    @AppStorage(SettingsKey.cardCornerRadius) private var cardCornerRadiusSetting = AppCardStyle.defaultCornerRadiusRaw
+
+    private var cardSize: CGSize {
+        AppCardStyle.seekCardSize(for: naturalSize, maxWidth: width, maxHeight: width * 9 / 16)
+    }
+
+    private var cornerRadius: CGFloat {
+        AppCardStyle.cornerRadius(for: cardCornerRadiusSetting, fallback: 16)
+    }
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1, orientation: .up)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: cardSize.width, height: cardSize.height)
+                    .clipped()
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    ProgressView()
+                        .tint(.white.opacity(0.8))
+                }
+                .frame(width: cardSize.width, height: cardSize.height)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.4), radius: 10, x: 0, y: 4)
     }
 }
 
@@ -185,7 +251,10 @@ struct InfuseScrubHUD: View {
     @ObservedObject var clock: PlaybackClock
     let title: String
     var episodeLine: String?
+    var thumbnail: CGImage?
+    var naturalSize: CGSize = CGSize(width: 16, height: 9)
     var wheelEngaged: Bool = false
+    var showThumbnailCard: Bool = true
 
     private var target: Double { clock.scrubTarget ?? clock.position }
     private var current: Double { clock.position }
@@ -213,7 +282,27 @@ struct InfuseScrubHUD: View {
                 GeometryReader { geo in
                     let w = geo.size.width
                     let x = min(max(w * fraction, 120), w - 120)
+                    let previewWidth = min(CGFloat(480), max(CGFloat(1), w - 32))
+                    let previewHeight = previewWidth * 9 / 16
+                    let cardSize = AppCardStyle.seekCardSize(
+                        for: naturalSize,
+                        maxWidth: previewWidth,
+                        maxHeight: previewHeight
+                    )
+                    let previewX = min(
+                        max(w * fraction, cardSize.width / 2 + 16),
+                        w - cardSize.width / 2 - 16
+                    )
                     ZStack(alignment: .topLeading) {
+                        if showThumbnailCard {
+                            SeekPreviewCard(
+                                image: thumbnail,
+                                width: previewWidth,
+                                naturalSize: naturalSize
+                            )
+                            .offset(x: previewX - cardSize.width / 2, y: previewHeight - cardSize.height)
+                        }
+
                         PlayerProgressTrack(
                             played: target / duration,
                             buffered: buffered / duration,
@@ -222,7 +311,7 @@ struct InfuseScrubHUD: View {
                             emphasized: true
                         )
                         .frame(height: 14)
-                        .offset(y: 54)
+                        .offset(y: previewHeight + 54)
 
                         // Ghost tick: live playback position while scrubbing.
                         Rectangle()
@@ -230,7 +319,7 @@ struct InfuseScrubHUD: View {
                             .frame(width: 3, height: 22)
                             .offset(
                                 x: w * CGFloat(min(max(current / duration, 0), 1)) - 1.5,
-                                y: 50
+                                y: previewHeight + 50
                             )
 
                         Text(PlayerTimeFormat.clock(target))
@@ -240,10 +329,10 @@ struct InfuseScrubHUD: View {
                             .padding(.vertical, 6)
                             .background(.ultraThinMaterial, in: Capsule())
                             .frame(width: 200, alignment: .center)
-                            .offset(x: x - 100, y: 0)
+                            .offset(x: x - 100, y: previewHeight)
                     }
                 }
-                .frame(height: 90)
+                .frame(height: 90 + 270)
 
                 HStack {
                     Text(PlayerTimeFormat.clock(target))
@@ -254,11 +343,11 @@ struct InfuseScrubHUD: View {
                         .foregroundStyle(.white.opacity(0.75))
                     Spacer()
                     if wheelEngaged {
-                        Label("Fine-tuning", systemImage: "arrow.triangle.2.circlepath")
+                        Label(L10n.string("player_seek_fine_tuning", fallback: "Fine-tuning"), systemImage: "arrow.triangle.2.circlepath")
                             .font(.system(size: 18, weight: .medium))
                             .foregroundStyle(.white.opacity(0.6))
                     } else {
-                        Label("Click to seek", systemImage: "hand.tap")
+                        Label(L10n.string("player_seek_click_to_seek", fallback: "Click to seek"), systemImage: "hand.tap")
                             .font(.system(size: 18, weight: .medium))
                             .foregroundStyle(.white.opacity(0.6))
                     }

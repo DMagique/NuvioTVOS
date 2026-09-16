@@ -452,6 +452,7 @@ struct PreparedNextStream {
     var addonName: String? = nil
     var videoSize: Int64? = nil
     var provider: String? = nil
+    var bingeGroup: String? = nil
 }
 
 struct PlayerTime: Equatable {

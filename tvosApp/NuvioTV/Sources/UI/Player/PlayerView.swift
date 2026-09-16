@@ -27,10 +27,12 @@ struct PlayerView: View {
     let externalSubtitles: [NuvioSubtitle]
     let resumeFrom: Double?
     var playbackOrigin: PlaybackOrigin = .main
+    var bingeGroup: String? = nil
     var addonName: String? = nil
     var provider: String? = nil
     var filename: String? = nil
     var videoSize: Int64? = nil
+    var trickplayURL: URL? = nil
     /// Episode context for the in-player Next Episode card. Empty for movies/trailers.
     var episodes: [NuvioVideo] = []
     var currentEpisode: NuvioVideo? = nil
@@ -61,6 +63,7 @@ struct PlayerView: View {
     @State var didHandleFinished = false
     @State var didReportPlaybackStarted = false
     @State var lastBecameActiveAt: Date = Date()
+    @State var requestedControlFocus: PlayerControlFocus? = nil
     @FocusState var remoteInputFocused: Bool
     @FocusState var startupRetryFocused: Bool
     @FocusState var nextEpisodeFocused: Bool

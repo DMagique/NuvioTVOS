@@ -250,6 +250,14 @@ final class PlaybackSessionCoordinator: ObservableObject {
         guard activeBackend == .aether else { return }
         guard allowAutomaticFallback else {
             print("[PlaybackCoordinator] terminal Aether error without fallback: \(message)")
+            lastLoadError = message
+            return
+        }
+        if let url = lastRequest?.videoURL,
+           PlaybackBackendPolicy.isRemoteHTTP(url.absoluteString),
+           !PlaybackEngineCapabilities.mpv.supportsDirectHTTPS {
+            print("[PlaybackCoordinator] terminal Aether error on remote stream; suppressing MPV fallback: \(message)")
+            lastLoadError = message
             return
         }
         // Ignore recoverable wording — Aether phase already filters rebuffering/stalled.
@@ -291,6 +299,10 @@ final class PlaybackSessionCoordinator: ObservableObject {
             mpvController.load(request)
             mpvController.setAspectMode(.fit)
         }
+    }
+
+    func setExternalTrickplayProvider(_ provider: (any TrickplayProviding)?) {
+        aetherController?.setExternalTrickplayProvider(provider)
     }
 }
 

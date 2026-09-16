@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import CoreGraphics
+import CoreImage
 
 /// Video renderer using AVSampleBufferDisplayLayer for optimal frame pacing.
 ///
@@ -43,6 +45,11 @@ final class SampleBufferRenderer: @unchecked Sendable {
     private let reorderLock = NSLock()
     private var reorderBuffer: [(CVPixelBuffer, CMTime, Data?)] = []
     private let reorderDepth = 4  // handles up to 3 consecutive B-frames
+
+    /// Passive frame harvesting: mirrors the latest decoded frame handed to the presentation layer.
+    private let capturedFrameLock = NSLock()
+    private var _currentPixelBuffer: CVPixelBuffer?
+    private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
 
     /// Drop frames before this PTS after a seek (prevents keyframe-to-target fast-forward). Cleared after the first passing frame.
     private var skipUntilPTS: CMTime?
@@ -380,6 +387,12 @@ final class SampleBufferRenderer: @unchecked Sendable {
         cachedFormatKey = nil
         reorderLock.unlock()
 
+        if removingDisplayedImage {
+            capturedFrameLock.lock()
+            _currentPixelBuffer = nil
+            capturedFrameLock.unlock()
+        }
+
         let modern: Bool
         if #available(tvOS 18.0, iOS 18.0, macOS 15.0, *) { modern = true } else { modern = false }
         switch DisplayFlushOp.resolve(removingDisplayedImage: removingDisplayedImage, modernRenderer: modern) {
@@ -414,6 +427,10 @@ final class SampleBufferRenderer: @unchecked Sendable {
 
     private func flushFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, hdr10PlusData: Data?,
                             nextPTS: CMTime? = nil) {
+        capturedFrameLock.lock()
+        _currentPixelBuffer = pixelBuffer
+        capturedFrameLock.unlock()
+
         let outputBuffer = subtitleCompositor.composite(pixelBuffer, ptsSeconds: pts.seconds)
         guard let sampleBuffer = createSampleBuffer(
             from: outputBuffer, pts: pts,
@@ -475,6 +492,31 @@ final class SampleBufferRenderer: @unchecked Sendable {
             scheduleQueueDiagnosticsRefresh()
             EngineLog.emit("[Renderer] enqueue #\(handed): status=\(statusName) ready=\(queueTarget.isReadyForMoreMediaData) error=\(queueErrorDescription ?? "nil")", category: .swPlayback)
         }
+    }
+
+    /// Captures the most recently decoded video frame directly from the presentation buffer.
+    /// Scaled to `maxWidth` via CoreImage Metal pipeline with 0 extra HTTP reads or decoders.
+    func captureCurrentFrame(maxWidth: Int = 320) -> CGImage? {
+        capturedFrameLock.lock()
+        guard let buffer = _currentPixelBuffer else {
+            capturedFrameLock.unlock()
+            return nil
+        }
+        capturedFrameLock.unlock()
+
+        let ciImage = CIImage(cvPixelBuffer: buffer)
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let scale = min(1.0, CGFloat(maxWidth) / extent.width)
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        } else {
+            scaledImage = ciImage
+        }
+
+        return ciContext.createCGImage(scaledImage, from: scaledImage.extent)
     }
 
     private var statusName: String {

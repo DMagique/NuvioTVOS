@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import NuvioTV
 
 final class HomeLayoutSettingsTests: XCTestCase {
@@ -464,4 +465,123 @@ final class HomeLayoutSettingsTests: XCTestCase {
         // Clean up
         TVHomeCatalogOrder.clearOrder()
     }
+
+    func testHomeCatalogSyncItemDecodesCustomTitle() {
+        let dict: [String: Any] = [
+            "addon_id": "com.aio.metadata",
+            "type": "series",
+            "catalog_id": "top_20",
+            "custom_title": "Top 20 TV Shows of the Week",
+            "enabled": true,
+            "order": 1
+        ]
+        guard let item = HomeCatalogSyncItem(dictionary: dict) else {
+            XCTFail("Failed to initialize HomeCatalogSyncItem")
+            return
+        }
+        XCTAssertEqual(item.addonId, "com.aio.metadata")
+        XCTAssertEqual(item.type, "series")
+        XCTAssertEqual(item.catalogId, "top_20")
+        XCTAssertEqual(item.customTitle, "Top 20 TV Shows of the Week")
+        XCTAssertTrue(item.enabled)
+    }
+
+    func testTVHomeCatalogOrderCustomTitlesPersistenceAndSync() {
+        let profileId = "test_custom_titles_profile"
+        // Clean up any leftover data from previous runs
+        let store = ProfileSettings.store(for: profileId)
+        store.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
+        store.removeObject(forKey: SettingsKey.homeCatalogDisabled)
+        store.removeObject(forKey: SettingsKey.homeCollectionDisabled)
+        store.removeObject(forKey: SettingsKey.homeCatalogCustomTitles)
+        store.removeObject(forKey: SettingsKey.homeCatalogShowType)
+
+        let itemDict: [String: Any] = [
+            "addon_id": "com.aio.metadata",
+            "type": "series",
+            "catalog_id": "top_20",
+            "custom_title": "Top 20 TV Shows of the Week",
+            "enabled": true,
+            "order": 0
+        ]
+        let payload = HomeCatalogSyncPayload(dictionary: [
+            "items": [itemDict],
+            "show_catalog_type": false
+        ])
+
+        let didChange = NuvioSyncManager.applyHomeCatalogSettings(payload, localProfileId: profileId)
+        XCTAssertTrue(didChange)
+
+        guard let data = store.data(forKey: SettingsKey.homeCatalogCustomTitles),
+              let titles = try? JSONDecoder().decode([String: String].self, from: data) else {
+            XCTFail("Custom titles not saved to store")
+            return
+        }
+        XCTAssertEqual(titles["com.aio.metadata_series_top_20"], "Top 20 TV Shows of the Week")
+
+        // Clean up
+        store.removeObject(forKey: SettingsKey.homeCatalogSyncedOrder)
+        store.removeObject(forKey: SettingsKey.homeCatalogDisabled)
+        store.removeObject(forKey: SettingsKey.homeCollectionDisabled)
+        store.removeObject(forKey: SettingsKey.homeCatalogCustomTitles)
+        store.removeObject(forKey: SettingsKey.homeCatalogShowType)
+    }
+
+    func testHomeVerticalScrollAnimationCadenceMatchesFluidTiming() {
+        // Vertical scrolling uses critically damped spring (damping 1.0) to eliminate bounce-back,
+        // while horizontal strip scrolling uses 0.86 with momentum preservation.
+        XCTAssertEqual(
+            TVHomeLayout.verticalScrollAnimation,
+            Animation.interactiveSpring(response: 0.28, dampingFraction: 1.0, blendDuration: 0.20)
+        )
+        XCTAssertEqual(
+            TVHomeLayout.fastVerticalScrollAnimation,
+            Animation.interactiveSpring(response: 0.18, dampingFraction: 1.0, blendDuration: 0.12)
+        )
+        XCTAssertEqual(
+            TVHomeLayout.scrollAnimation,
+            Animation.interactiveSpring(response: 0.24, dampingFraction: 0.86, blendDuration: 0.18)
+        )
+    }
+
+    func testPosterShapeAndRowTileShapeResolution() {
+        let landscapeMeta = NuvioMeta(
+            id: "sport:1",
+            name: "Sky Sports Premier League",
+            description: nil,
+            posterUrl: "https://example.com/sky.jpg",
+            backgroundUrl: nil,
+            logoUrl: nil,
+            imdbId: nil,
+            tmdbId: nil,
+            type: "channel",
+            year: 2026,
+            genres: ["Sport"],
+            posterShape: "landscape"
+        )
+        XCTAssertEqual(landscapeMeta.tileShape, CollectionTileShape.landscape)
+
+        let row = TVCatalogRow(
+            id: "row:sports",
+            title: "Live Now - Sport",
+            horizontalEdgeInset: 40,
+            items: [landscapeMeta],
+            initialFocusCardKey: nil,
+            landscapeFocusedId: nil,
+            onInitialFocusRequested: {},
+            onFocus: { _ in },
+            onBlur: { _ in },
+            onApproachEnd: { _ in },
+            onSelect: { _ in }
+        )
+        XCTAssertEqual(row.rowTileShape, CollectionTileShape.landscape)
+
+        // Sizing tests for landscape vs portrait
+        XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .landscape, layoutMode: "Modern"), 560)
+        XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .landscape, layoutMode: "Compact"), 454)
+        XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .poster, layoutMode: "Modern"), 210)
+        XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .poster, layoutMode: "Compact"), 170)
+        XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .square, layoutMode: "Modern"), 315)
+    }
 }
+

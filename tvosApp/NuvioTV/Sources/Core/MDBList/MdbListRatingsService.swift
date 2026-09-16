@@ -119,7 +119,8 @@ enum MdbListRatingsService {
         tokenStorage: MdbListTokenStorage = MdbListKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
-        guard rating == nil || (rating! >= 1 && rating! <= 10),
+        guard ProfileSettings.isActiveStore(store),
+              rating == nil || (rating! >= 1 && rating! <= 10),
               !isEpisode(meta.type),
               let ids = providerIDs(for: meta) else { return false }
 
@@ -142,7 +143,7 @@ enum MdbListRatingsService {
             let response = try await service.authorizedRequest(
                 path: path, method: .post, body: try jsonData(body)
             )
-            guard (200..<300).contains(response.statusCode) else { return false }
+            guard (200..<300).contains(response.statusCode), ProfileSettings.isActiveStore(store) else { return false }
             cachedSnapshots.removeValue(forKey: cacheKey)
             NotificationCenter.default.post(name: changedNotification, object: nil)
             return true

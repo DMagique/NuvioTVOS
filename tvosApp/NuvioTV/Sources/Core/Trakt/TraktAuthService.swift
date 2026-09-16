@@ -175,6 +175,22 @@ enum TraktAuthStore {
         state(in: ProfileSettings.current)
     }
 
+    /// Authentication is valid only for the profile that explicitly linked
+    /// the account. The primary profile may use a legacy token created before
+    /// the profile link marker existed; secondary profiles must reconnect after
+    /// upgrading instead of inheriting that token.
+    static var isAuthenticated: Bool {
+        isAuthenticated(in: ProfileSettings.current)
+    }
+
+    static func isAuthenticated(in defaults: UserDefaults) -> Bool {
+        guard state(in: defaults).isAuthenticated(in: defaults) else { return false }
+        if (defaults.object(forKey: SettingsKey.traktConnected) as? Bool) == true {
+            return true
+        }
+        return ProfileSettings.isPrimaryProfileStore(defaults)
+    }
+
     static func state(in defaults: UserDefaults) -> TraktAuthState {
         return TraktAuthState(
             accessToken: defaults.string(forKey: Key.accessToken),
@@ -203,6 +219,7 @@ enum TraktAuthStore {
                 Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt,
                 Key.expiresIn, Key.username, Key.userSlug, Key.cachedStats
             ].forEach { defaults.removeObject(forKey: $0) }
+            defaults.removeObject(forKey: SettingsKey.traktConnected)
         }
         defaults.set(response.deviceCode, forKey: Key.deviceCode)
         defaults.set(response.userCode, forKey: Key.userCode)
@@ -223,6 +240,7 @@ enum TraktAuthStore {
         defaults.set(response.createdAt, forKey: Key.createdAt)
         defaults.set(normalizeTokenLifetime(response.expiresIn), forKey: Key.expiresIn)
         defaults.set(clientID, forKey: Key.credentialClientID)
+        defaults.set(true, forKey: SettingsKey.traktConnected)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -271,6 +289,7 @@ enum TraktAuthStore {
             Key.username, Key.userSlug, Key.deviceCode, Key.userCode, Key.verificationURL,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
+        defaults.removeObject(forKey: SettingsKey.traktConnected)
         NotificationCenter.default.post(name: changedNotification, object: nil)
         RemoteTrackingState.normalizeWatchProgressSource(in: defaults)
         RemoteTrackingState.normalizeLibrarySource(in: defaults)
@@ -368,7 +387,7 @@ enum TraktSettingsStore {
     ) {
         guard defaults.string(forKey: SettingsKey.traktWatchProgressSource) == nil else { return }
         let resolved: TraktWatchProgressSource
-        if TraktAuthStore.state(in: defaults).isAuthenticated(in: defaults) {
+        if TraktAuthStore.isAuthenticated(in: defaults) {
             resolved = .trakt
         } else if SimklRuntimeSession.authenticatedState(
             store: defaults,
@@ -456,11 +475,14 @@ enum RemoteTrackingState {
         case .nuvioSync:
             return false
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
         case .mdblist:
-            return MdbListRuntimeSession.isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
         }
     }
 
@@ -493,11 +515,14 @@ enum RemoteTrackingState {
         case .local:
             return true
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
         case .mdblist:
-            return MdbListRuntimeSession.isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
         }
     }
 
@@ -527,9 +552,11 @@ enum RemoteTrackingState {
     ) -> Bool {
         switch source {
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
         case .tmdb:
             let apiKey = store.string(forKey: SettingsKey.tmdbApiKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -575,11 +602,14 @@ enum RemoteTrackingState {
         case .nuvioSync:
             return false
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
         case .mdblist:
-            return MdbListRuntimeSession.isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
         }
     }
 
@@ -589,7 +619,8 @@ enum RemoteTrackingState {
     static func shouldMirrorWatchedHistoryToTrakt(
         in store: UserDefaults = ProfileSettings.current
     ) -> Bool {
-        TraktAuthStore.state(in: store).isAuthenticated(in: store)
+        ProfileSettings.isActiveStore(store)
+            && TraktAuthStore.isAuthenticated(in: store)
     }
 }
 
@@ -800,9 +831,9 @@ final class TraktAuthService {
     }
 
     func refreshTokenIfNeeded(force: Bool = false) async -> Bool {
-        guard hasRequiredCredentials() else { return false }
+        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
-        guard state.isAuthenticated(in: store), let refreshToken = state.refreshToken else { return false }
+        guard TraktAuthStore.isAuthenticated(in: store), let refreshToken = state.refreshToken else { return false }
         if !force && !isTokenExpiredOrExpiring(state) { return true }
 
         do {
@@ -831,7 +862,7 @@ final class TraktAuthService {
 
     func revokeAndLogout() async {
         let state = currentState()
-        if hasRequiredCredentials(), state.isAuthenticated(in: store), let accessToken = state.accessToken {
+        if hasRequiredCredentials(), TraktAuthStore.isAuthenticated(in: store), let accessToken = state.accessToken {
             try? await postEmpty(
                 path: "oauth/revoke",
                 body: TraktRevokeRequest(
@@ -1296,7 +1327,7 @@ struct TraktProgressService {
         }
 
         guard source == .trakt,
-              TraktAuthStore.state.isAuthenticated else {
+              TraktAuthStore.isAuthenticated else {
             return []
         }
 
@@ -1641,7 +1672,8 @@ struct TraktProgressService {
         }
 
         guard source == .trakt,
-              TraktAuthStore.state(in: store).isAuthenticated(in: store),
+              ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store),
               position.isFinite,
               duration.isFinite,
               duration > 0,
@@ -1997,7 +2029,8 @@ struct TraktHistoryService {
     static func fetchWatchedHistory(
         store: UserDefaults = ProfileSettings.current
     ) async -> [WatchedStoreItem]? {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store) else { return nil }
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return nil }
 
         let service = TraktAuthService(store: store)
         guard await service.refreshTokenIfNeeded() else { return nil }
@@ -2014,7 +2047,8 @@ struct TraktHistoryService {
     static func syncWatchedHistory(
         store: UserDefaults = ProfileSettings.current
     ) async -> Bool {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store) else { return false }
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return false }
 
         let targetProfileId = WatchedStore.activeProfileId
         if let inFlightSync,
@@ -2047,7 +2081,8 @@ struct TraktHistoryService {
         store: UserDefaults,
         targetProfileId: String?
     ) async -> Bool {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store) else { return false }
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return false }
 
         let service = TraktAuthService(store: store)
         guard await service.refreshTokenIfNeeded() else { return false }
@@ -2203,7 +2238,8 @@ struct TraktHistoryService {
         store: UserDefaults = ProfileSettings.current,
         notifyChange: Bool = true
     ) async -> Bool {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store),
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store),
               let mutation = mutation(
                 for: meta,
                 season: season,
@@ -2609,7 +2645,7 @@ struct TraktLibraryService {
     /// instead of writing only to the hidden local library.
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
         guard TraktSettingsStore.librarySourceMode == .trakt,
-              TraktAuthStore.state.isAuthenticated,
+              TraktAuthStore.isAuthenticated,
               let body = watchlistMutation(for: meta) else {
             return false
         }
@@ -2639,7 +2675,7 @@ struct TraktLibraryService {
         requireSelectedSource: Bool = true
     ) async -> [LibraryStoreItem]? {
         guard (!requireSelectedSource || TraktSettingsStore.librarySourceMode == .trakt),
-              TraktAuthStore.state.isAuthenticated else {
+              TraktAuthStore.isAuthenticated else {
             return []
         }
 
@@ -2941,7 +2977,7 @@ final class TraktSettingsViewModel: ObservableObject {
         deviceCodeExpiresAtMillis = state.expiresAt
         tokenExpiresAtMillis = state.tokenExpiresAtMillis
         pollInterval = state.pollInterval ?? 5
-        let isAuthenticated = state.isAuthenticated(in: store)
+        let isAuthenticated = TraktAuthStore.isAuthenticated(in: store)
         mode = isAuthenticated
             ? .connected
             : (state.hasActiveDeviceFlow(in: store) ? .awaitingApproval : .disconnected)

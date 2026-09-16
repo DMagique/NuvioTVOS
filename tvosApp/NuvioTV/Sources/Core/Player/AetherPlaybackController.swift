@@ -3,6 +3,8 @@ import UIKit
 import AVFoundation
 import MediaPlayer
 import Combine
+import ImageIO
+import CryptoKit
 import AetherEngine
 import AetherEngineSMB
 
@@ -1532,9 +1534,804 @@ enum AetherPlaybackLifecyclePolicy {
     }
 }
 
+/// Pure sampling and lookup rules for the bounded seek-thumbnail index.
+enum HybridSeekThumbnailPolicy {
+    static let fineBucketSeconds: Double = 0.5
+    static let coarseIntervalSeconds: Double = 60
+    static let maximumCoarseSamples = 120
+    static let maximumPreviewTimeError: Double = 0.5
+
+    static func fineBucket(for seconds: Double) -> Int? {
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return Int(floor(seconds / fineBucketSeconds))
+    }
+
+    static func coarseSampleTimes(
+        duration: Double,
+        interval: Double = coarseIntervalSeconds,
+        maximumSamples: Int = maximumCoarseSamples
+    ) -> [Double] {
+        guard duration.isFinite, duration >= interval, interval >= coarseIntervalSeconds,
+              maximumSamples > 0 else { return [] }
+        let count = min(maximumSamples, max(1, Int(ceil(duration / interval))))
+        let chronological = (0..<count).map { (Double($0) + 0.5) * duration / Double(count) }
+        var ordered: [Double] = []
+        ordered.reserveCapacity(count)
+
+        // Breadth-first subdivision: midpoint, quarters, eighths, ... gives
+        // useful coverage across the whole title before local refinement.
+        var ranges: [(Int, Int)] = [(0, count - 1)]
+        while !ranges.isEmpty {
+            let (lower, upper) = ranges.removeFirst()
+            guard lower <= upper else { continue }
+            let middle = (lower + upper) / 2
+            ordered.append(chronological[middle])
+            if lower < middle { ranges.append((lower, middle - 1)) }
+            if middle < upper { ranges.append((middle + 1, upper)) }
+        }
+        return ordered.filter { $0 > 0 && $0 < duration }
+    }
+
+    static func coarseLookupTolerance(
+        duration: Double,
+        interval: Double = coarseIntervalSeconds,
+        maximumSamples: Int = maximumCoarseSamples
+    ) -> Double {
+        guard duration.isFinite, duration > 0 else { return 0 }
+        // Coarse entries provide nearest-neighbor fallback coverage within a tight bounds
+        // (<= 10 seconds) so distant frames are never shown as misleading matches.
+        return min(10.0, max(2.0, duration / Double(max(1, maximumSamples * 6))))
+    }
+
+    static func acceptsCoarse(
+        sampleSeconds: Double,
+        targetSeconds: Double,
+        duration: Double,
+        interval: Double = coarseIntervalSeconds
+    ) -> Bool {
+        guard sampleSeconds.isFinite, targetSeconds.isFinite else { return false }
+        return abs(sampleSeconds - targetSeconds)
+            <= coarseLookupTolerance(duration: duration, interval: interval)
+    }
+}
+
+// MARK: - Trickplay Protocol & Caching
+
+/// Common interface for trickplay thumbnail providers (WebVTT, BIF, or custom sprite sheets).
+protocol TrickplayProviding: AnyObject, Sendable {
+    func thumbnail(at seconds: Double) async -> CGImage?
+}
+
+/// High-performance persistent disk cache for video seek preview stills.
+/// Stores lightweight compressed JPEGs (~15 KB) under `Caches/Trickplay/<streamKey>/`.
+/// Uses memory-mapped reads (`.mappedIfSafe`) to return `CGImage` in ~0.5 ms.
+actor TrickplayDiskCache {
+    static let shared = TrickplayDiskCache()
+
+    private let fileManager = FileManager.default
+    private let baseDirectory: URL
+    private let maxDiskBytes: Int64 = 100 * 1024 * 1024 // 100 MB budget
+    private var lastPruneTime = Date.distantPast
+
+    init(directoryOverride: URL? = nil) {
+        if let override = directoryOverride {
+            self.baseDirectory = override
+        } else {
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+                ?? URL(fileURLWithPath: NSTemporaryDirectory())
+            self.baseDirectory = caches.appendingPathComponent("Trickplay", isDirectory: true)
+        }
+        try? fileManager.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Fast, deterministic identifier for a stream source.
+    static func streamKey(for urlString: String, duration: Double = 0) -> String {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "default" }
+        let seed = trimmed + (duration > 0 ? "_\(Int(duration))" : "")
+        var hash: UInt64 = 5381
+        for byte in seed.utf8 {
+            hash = ((hash << 5) &+ hash) &+ UInt64(byte)
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    /// Canonical content identifier hashing IMDb/Cinemeta ID, season, episode, and duration bucket.
+    /// Uses 10-second duration buckets like VortX to prevent different cuts/releases from sharing previews.
+    static func canonicalKey(
+        contentId: String?,
+        season: Int? = nil,
+        episode: Int? = nil,
+        duration: Double? = nil,
+        fallbackURL: String = ""
+    ) -> String {
+        let id = (contentId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !id.isEmpty {
+            let s = season ?? 0
+            let e = episode ?? 0
+            let durBucket = duration.map { Int(floor($0 / 10.0)) * 10 } ?? 0
+            let raw = "\(id):\(s):\(e):\(durBucket)"
+            let digest = SHA256.hash(data: Data(raw.utf8))
+            let hex = digest.map { String(format: "%02x", $0) }.joined()
+            return "canon_\(hex.prefix(16))"
+        }
+        return streamKey(for: fallbackURL, duration: duration ?? 0)
+    }
+
+    private func itemDirectory(for streamKey: String) -> URL {
+        baseDirectory.appendingPathComponent(streamKey, isDirectory: true)
+    }
+
+    /// Looks up a cached frame and its true timestamp for a given stream key.
+    func lookupWithTimestamp(streamKey: String, seconds: Double, tolerance: Double = 2.0) -> (image: CGImage, seconds: Double)? {
+        guard !streamKey.isEmpty, seconds.isFinite, seconds >= 0 else { return nil }
+        let targetBucket = Int(seconds.rounded())
+        let dir = itemDirectory(for: streamKey)
+
+        // 1. Direct hit on exact rounded second
+        let exactFile = dir.appendingPathComponent("\(targetBucket).jpg")
+        if let image = loadImage(at: exactFile) {
+            return (image, Double(targetBucket))
+        }
+
+        // 2. Tolerance search for nearest neighbor within tolerance
+        let maxDelta = max(0, Int(ceil(tolerance)))
+        if maxDelta > 0 {
+            for delta in 1...maxDelta {
+                let minusFile = dir.appendingPathComponent("\(targetBucket - delta).jpg")
+                if let image = loadImage(at: minusFile) {
+                    return (image, Double(targetBucket - delta))
+                }
+                let plusFile = dir.appendingPathComponent("\(targetBucket + delta).jpg")
+                if let image = loadImage(at: plusFile) {
+                    return (image, Double(targetBucket + delta))
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Looks up a cached frame for a given stream key and timestamp.
+    /// Returns immediately via memory mapping if found on disk.
+    func lookup(streamKey: String, seconds: Double, tolerance: Double = 2.0) -> CGImage? {
+        lookupWithTimestamp(streamKey: streamKey, seconds: seconds, tolerance: tolerance)?.image
+    }
+
+    /// Asynchronously stores an image to the persistent trickplay disk store.
+    func store(image: CGImage, streamKey: String, seconds: Double) {
+        guard !streamKey.isEmpty, seconds.isFinite, seconds >= 0 else { return }
+        let bucket = Int(seconds.rounded())
+        let dir = itemDirectory(for: streamKey)
+        try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("\(bucket).jpg")
+
+        guard let data = encodeJPEG(image: image, quality: 0.72) else { return }
+        try? data.write(to: file, options: .atomic)
+
+        let now = Date()
+        if now.timeIntervalSince(lastPruneTime) > 300 {
+            lastPruneTime = now
+            pruneIfNeeded()
+        }
+    }
+
+    private func loadImage(at url: URL) -> CGImage? {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return nil
+        }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        return image
+    }
+
+    private func encodeJPEG(image: CGImage, quality: CGFloat) -> Data? {
+        let data = NSMutableData()
+        let type = "public.jpeg" as CFString
+        guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, type, 1, nil) else {
+            return nil
+        }
+        let options: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: quality
+        ]
+        CGImageDestinationAddImage(dest, image, options as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return data as Data
+    }
+
+    /// Clears frames for a specific stream.
+    func clear(streamKey: String) {
+        let dir = itemDirectory(for: streamKey)
+        try? fileManager.removeItem(at: dir)
+    }
+
+    /// Lists all stored JPEG frames for a given stream key, sorted by timestamp.
+    func listStoredFrames(streamKey: String) -> [(seconds: Double, fileURL: URL)] {
+        guard !streamKey.isEmpty else { return [] }
+        let dir = itemDirectory(for: streamKey)
+        guard let files = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            return []
+        }
+        var result: [(seconds: Double, fileURL: URL)] = []
+        for file in files where file.pathExtension.lowercased() == "jpg" {
+            let name = file.deletingPathExtension().lastPathComponent
+            if let sec = Double(name) {
+                result.append((seconds: sec, fileURL: file))
+            }
+        }
+        return result.sorted(by: { $0.seconds < $1.seconds })
+    }
+
+    /// Enforces total cache budget by evicting oldest modified directories.
+    private func pruneIfNeeded() {
+        guard let enumerator = fileManager.enumerator(
+            at: baseDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsSubdirectoryDescendants]
+        ) else { return }
+
+        var itemDirs: [(url: URL, modified: Date, size: Int64)] = []
+        var totalSize: Int64 = 0
+
+        for case let fileURL as URL in enumerator {
+            var isDir: ObjCBool = false
+            if fileManager.fileExists(atPath: fileURL.path, isDirectory: &isDir), isDir.boolValue {
+                let mod = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                let dirSize = calculateDirectorySize(at: fileURL)
+                totalSize += dirSize
+                itemDirs.append((url: fileURL, modified: mod, size: dirSize))
+            }
+        }
+
+        if totalSize > maxDiskBytes {
+            itemDirs.sort { $0.modified < $1.modified }
+            for item in itemDirs {
+                try? fileManager.removeItem(at: item.url)
+                totalSize -= item.size
+                if totalSize <= maxDiskBytes * 3 / 4 {
+                    break
+                }
+            }
+        }
+    }
+
+    private func calculateDirectorySize(at url: URL) -> Int64 {
+        guard let files = try? fileManager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+            return 0
+        }
+        var size: Int64 = 0
+        for file in files {
+            size += Int64((try? file.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+        }
+        return size
+    }
+}
+
+/// WebVTT storyboard trickplay provider.
+/// Parses WebVTT cue playlists with `#xywh=x,y,w,h` sprite coordinates
+/// and crops thumbnail sub-rectangles with 0% video decoder overhead.
+actor WebVTTStoryboardProvider: TrickplayProviding {
+    struct Cue: Sendable {
+        let startSeconds: Double
+        let endSeconds: Double
+        let imageURL: URL
+        let rect: CGRect
+    }
+
+    private let cues: [Cue]
+    private var spriteCache: [URL: CGImage] = [:]
+
+    init(cues: [Cue]) {
+        self.cues = cues.sorted(by: { $0.startSeconds < $1.startSeconds })
+    }
+
+    /// Parses a standard WebVTT storyboard string and a base URL for resolving relative sprite sheet paths.
+    nonisolated static func parse(vttContent: String, baseURL: URL) -> WebVTTStoryboardProvider? {
+        var parsedCues: [Cue] = []
+        let lines = vttContent.components(separatedBy: .newlines)
+        var i = 0
+
+        while i < lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.contains("-->") {
+                let parts = line.components(separatedBy: "-->")
+                if parts.count == 2,
+                   let start = parseTimestamp(parts[0].trimmingCharacters(in: .whitespaces)),
+                   let end = parseTimestamp(parts[1].trimmingCharacters(in: .whitespaces)) {
+                    if i + 1 < lines.count {
+                        let payload = lines[i + 1].trimmingCharacters(in: .whitespacesAndNewlines)
+                        if let cue = parseCuePayload(payload, start: start, end: end, baseURL: baseURL) {
+                            parsedCues.append(cue)
+                            i += 1
+                        }
+                    }
+                }
+            }
+            i += 1
+        }
+
+        guard !parsedCues.isEmpty else { return nil }
+        return WebVTTStoryboardProvider(cues: parsedCues)
+    }
+
+    private static func parseTimestamp(_ raw: String) -> Double? {
+        let components = raw.components(separatedBy: ":")
+        guard !components.isEmpty else { return nil }
+        var seconds: Double = 0
+        if components.count == 3 {
+            guard let h = Double(components[0]),
+                  let m = Double(components[1]),
+                  let s = Double(components[2]) else { return nil }
+            seconds = h * 3600 + m * 60 + s
+        } else if components.count == 2 {
+            guard let m = Double(components[0]),
+                  let s = Double(components[1]) else { return nil }
+            seconds = m * 60 + s
+        } else {
+            return Double(raw)
+        }
+        return seconds
+    }
+
+    private static func parseCuePayload(
+        _ payload: String,
+        start: Double,
+        end: Double,
+        baseURL: URL
+    ) -> Cue? {
+        let parts = payload.components(separatedBy: "#xywh=")
+        guard parts.count == 2 else { return nil }
+        let urlPart = parts[0].trimmingCharacters(in: .whitespaces)
+        let coordPart = parts[1].trimmingCharacters(in: .whitespaces)
+
+        let coords = coordPart.components(separatedBy: ",").compactMap { Double($0) }
+        guard coords.count == 4 else { return nil }
+        let rect = CGRect(x: coords[0], y: coords[1], width: coords[2], height: coords[3])
+
+        let imageURL: URL
+        if let direct = URL(string: urlPart), direct.scheme != nil {
+            imageURL = direct
+        } else {
+            imageURL = baseURL.deletingLastPathComponent().appendingPathComponent(urlPart)
+        }
+
+        return Cue(startSeconds: start, endSeconds: end, imageURL: imageURL, rect: rect)
+    }
+
+    func thumbnail(at seconds: Double) async -> CGImage? {
+        guard !cues.isEmpty, seconds.isFinite, seconds >= 0 else { return nil }
+        var low = 0
+        var high = cues.count - 1
+        var matched: Cue?
+
+        while low <= high {
+            let mid = (low + high) / 2
+            let cue = cues[mid]
+            if seconds < cue.startSeconds {
+                high = mid - 1
+            } else if seconds >= cue.endSeconds {
+                low = mid + 1
+            } else {
+                matched = cue
+                break
+            }
+        }
+
+        guard let targetCue = matched ?? cues.last(where: { $0.startSeconds <= seconds }) ?? cues.first else {
+            return nil
+        }
+
+        let spriteSheet = await loadSpriteSheet(for: targetCue.imageURL)
+        return spriteSheet?.cropping(to: targetCue.rect)
+    }
+
+    private func loadSpriteSheet(for url: URL) async -> CGImage? {
+        if let cached = spriteCache[url] {
+            return cached
+        }
+
+        guard let data = try? await URLSession.shared.data(from: url).0,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+
+        spriteCache[url] = image
+        if spriteCache.count > 10 {
+            spriteCache.remove(at: spriteCache.startIndex)
+        }
+
+        return image
+    }
+}
+
+/// Resolves remote WebVTT storyboards and sprite sheets asynchronously.
+actor TrickplayResolver {
+    static let shared = TrickplayResolver()
+
+    /// Checks direct trickplay URL or community trickplay endpoints.
+    func resolve(
+        contentId: String?,
+        season: Int? = nil,
+        episode: Int? = nil,
+        duration: Double? = nil,
+        directTrickplayURL: URL? = nil
+    ) async -> (any TrickplayProviding)? {
+        // 1. Direct trickplay URL from stream add-on metadata
+        if let direct = directTrickplayURL {
+            if let provider = await fetchStoryboard(from: direct) {
+                return provider
+            }
+        }
+
+        // 2. Canonical content identity lookup
+        let id = (contentId ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !id.isEmpty else { return nil }
+
+        let s = season ?? 0
+        let e = episode ?? 0
+        let server = await MainActor.run {
+            ProfileSettings.current.string(forKey: SettingsKey.trickplayServer)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        guard !server.isEmpty, let baseURL = URL(string: server) else { return nil }
+
+        var bucketsToTry: [Int] = []
+        if let dur = duration, dur > 0 {
+            let baseBucket = Int(floor(dur / 10.0)) * 10
+            bucketsToTry = [baseBucket, max(0, baseBucket - 10), baseBucket + 10]
+        } else {
+            bucketsToTry = [0]
+        }
+
+        for durBucket in bucketsToTry {
+            let raw = "\(id):\(s):\(e):\(durBucket)"
+            let digest = SHA256.hash(data: Data(raw.utf8))
+            let hex = digest.map { String(format: "%02x", $0) }.joined()
+            let shortHash = String(hex.prefix(16))
+
+            let candidateKeys = [shortHash, "canon_\(shortHash)", hex]
+            for key in candidateKeys {
+                let manifestURL = baseURL
+                    .appendingPathComponent("tp", isDirectory: true)
+                    .appendingPathComponent(key, isDirectory: true)
+                    .appendingPathComponent("index.vtt", isDirectory: false)
+                if let provider = await fetchStoryboard(from: manifestURL) {
+                    return provider
+                }
+            }
+        }
+
+        return nil
+    }
+
+    func fetchStoryboard(from vttURL: URL) async -> WebVTTStoryboardProvider? {
+        var request = URLRequest(url: vttURL)
+        request.timeoutInterval = 8.0
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode),
+              let vttString = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return WebVTTStoryboardProvider.parse(vttContent: vttString, baseURL: vttURL)
+    }
+}
+
+/// Generates WebVTT cue playlists and combined sprite sheet images from locally harvested frames.
+enum TrickplayStoryboardBuilder {
+    struct StoryboardBundle: Sendable {
+        let vttContent: String
+        let spriteJPEGData: Data
+        let frameCount: Int
+    }
+
+    /// Builds a sprite sheet and WebVTT cue manifest from cached frames if coverage threshold is reached.
+    static func buildStoryboard(
+        frames: [(seconds: Double, fileURL: URL)],
+        duration: Double,
+        columns: Int = 10,
+        thumbWidth: CGFloat = 160,
+        thumbHeight: CGFloat = 90
+    ) -> StoryboardBundle? {
+        guard frames.count >= 15 else { return nil }
+        let totalCount = frames.count
+        let rows = Int(ceil(Double(totalCount) / Double(columns)))
+        let totalWidth = CGFloat(columns) * thumbWidth
+        let totalHeight = CGFloat(rows) * thumbHeight
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: totalWidth, height: totalHeight), format: format)
+
+        var loadedImages: [(index: Int, rect: CGRect, image: UIImage)] = []
+        for (i, frame) in frames.enumerated() {
+            let col = i % columns
+            let row = i / columns
+            let rect = CGRect(
+                x: CGFloat(col) * thumbWidth,
+                y: CGFloat(row) * thumbHeight,
+                width: thumbWidth,
+                height: thumbHeight
+            )
+            if let image = UIImage(contentsOfFile: frame.fileURL.path) {
+                loadedImages.append((index: i, rect: rect, image: image))
+            }
+        }
+
+        guard !loadedImages.isEmpty else { return nil }
+
+        let spriteImage = renderer.image { _ in
+            for item in loadedImages {
+                item.image.draw(in: item.rect)
+            }
+        }
+
+        guard let jpegData = spriteImage.jpegData(compressionQuality: 0.75) else {
+            return nil
+        }
+
+        var vtt = "WEBVTT\n\n"
+        for (i, frame) in frames.enumerated() {
+            let col = i % columns
+            let row = i / columns
+            let x = Int(CGFloat(col) * thumbWidth)
+            let y = Int(CGFloat(row) * thumbHeight)
+            let w = Int(thumbWidth)
+            let h = Int(thumbHeight)
+
+            let start = frame.seconds
+            let end: Double
+            if i + 1 < frames.count {
+                end = frames[i + 1].seconds
+            } else {
+                end = min(start + 10.0, max(start + 1.0, duration))
+            }
+
+            let startStr = formatVTTTimestamp(start)
+            let endStr = formatVTTTimestamp(end)
+            vtt += "\(startStr) --> \(endStr)\n"
+            vtt += "sprite.jpg#xywh=\(x),\(y),\(w),\(h)\n\n"
+        }
+
+        return StoryboardBundle(
+            vttContent: vtt,
+            spriteJPEGData: jpegData,
+            frameCount: loadedImages.count
+        )
+    }
+
+    private static func formatVTTTimestamp(_ seconds: Double) -> String {
+        let totalSeconds = max(0, seconds)
+        let hours = Int(totalSeconds / 3600)
+        let minutes = Int((totalSeconds.truncatingRemainder(dividingBy: 3600)) / 60)
+        let secs = Int(totalSeconds.truncatingRemainder(dividingBy: 60))
+        let millis = Int((totalSeconds - floor(totalSeconds)) * 1000)
+        return String(format: "%02d:%02d:%02d.%03d", hours, minutes, secs, millis)
+    }
+}
+
+/// Manages community storyboard generation and background upload to VortX / community trickplay servers.
+actor TrickplayUploader {
+    static let shared = TrickplayUploader()
+
+    private var uploadedKeys: Set<String> = []
+    private var inFlightKeys: Set<String> = []
+
+    func uploadIfEligible(
+        canonicalKey: String,
+        duration: Double
+    ) async {
+        guard !canonicalKey.isEmpty, duration > 30 else { return }
+        guard !uploadedKeys.contains(canonicalKey) else { return }
+        guard !inFlightKeys.contains(canonicalKey) else { return }
+
+        let server = await MainActor.run {
+            ProfileSettings.current.string(forKey: SettingsKey.trickplayServer)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+        guard !server.isEmpty, let baseURL = URL(string: server) else { return }
+
+        let frames = await TrickplayDiskCache.shared.listStoredFrames(streamKey: canonicalKey)
+        guard frames.count >= 15 else { return }
+
+        guard let bundle = TrickplayStoryboardBuilder.buildStoryboard(
+            frames: frames,
+            duration: duration
+        ) else { return }
+
+        inFlightKeys.insert(canonicalKey)
+        defer { inFlightKeys.remove(canonicalKey) }
+
+        let uploadURL = baseURL
+            .appendingPathComponent("tp", isDirectory: true)
+            .appendingPathComponent(canonicalKey, isDirectory: false)
+
+        var request = URLRequest(url: uploadURL)
+        request.httpMethod = "POST"
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        var body = Data()
+        if let header = "--\(boundary)\r\nContent-Disposition: form-data; name=\"vtt\"; filename=\"index.vtt\"\r\nContent-Type: text/vtt\r\n\r\n".data(using: .utf8),
+           let footer = "\r\n".data(using: .utf8),
+           let vttData = bundle.vttContent.data(using: .utf8) {
+            body.append(header)
+            body.append(vttData)
+            body.append(footer)
+        }
+
+        if let header = "--\(boundary)\r\nContent-Disposition: form-data; name=\"sprite\"; filename=\"sprite.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n".data(using: .utf8),
+           let footer = "\r\n--\(boundary)--\r\n".data(using: .utf8) {
+            body.append(header)
+            body.append(bundle.spriteJPEGData)
+            body.append(footer)
+        }
+
+        request.httpBody = body
+        request.timeoutInterval = 30.0
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) {
+                uploadedKeys.insert(canonicalKey)
+            }
+        } catch {
+            // Upload failure is non-fatal; will retry on subsequent sessions
+        }
+    }
+}
+
+/// Session-scoped, bounded hybrid cache. Fine entries use half-second buckets;
+/// coarse entries are nearest-neighbor fallbacks within the same precision bound.
+actor HybridSeekThumbnailIndex {
+    enum Kind: Sendable { case fine, coarse }
+
+    private struct Entry {
+        let image: CGImage
+        let seconds: Double
+        let kind: Kind
+        let cost: Int
+        var lastAccess: UInt64
+    }
+
+    private let byteLimit = 32 * 1024 * 1024
+    private let entryLimit = 256
+    private var fine: [Int: Entry] = [:]
+    private var coarse: [Int: Entry] = [:]
+    private var totalCost = 0
+    private var accessCounter: UInt64 = 0
+    private var generation: UInt64 = 0
+    private var streamKey: String = ""
+    private var externalTrickplayProvider: (any TrickplayProviding)?
+
+    func setExternalTrickplayProvider(_ provider: (any TrickplayProviding)?) {
+        self.externalTrickplayProvider = provider
+    }
+
+    func reset(generation: UInt64, streamKey: String = "") {
+        guard generation >= self.generation else { return }
+        fine.removeAll(keepingCapacity: true)
+        coarse.removeAll(keepingCapacity: true)
+        totalCost = 0
+        accessCounter = 0
+        self.generation = generation
+        self.streamKey = streamKey
+        self.externalTrickplayProvider = nil
+    }
+
+    func lookup(seconds: Double, duration: Double, generation: UInt64) async -> CGImage? {
+        guard self.generation == generation, duration.isFinite, duration > 0 else { return nil }
+
+        // Tier 1: External Storyboard / BIF (0ms instant crop)
+        if let external = externalTrickplayProvider {
+            if let image = await external.thumbnail(at: seconds) {
+                return image
+            }
+        }
+
+        // Tier 2: In-memory fine bucket
+        if let bucket = HybridSeekThumbnailPolicy.fineBucket(for: seconds),
+           var entry = fine[bucket] {
+            guard abs(entry.seconds - seconds)
+                    <= HybridSeekThumbnailPolicy.maximumPreviewTimeError else { return nil }
+            accessCounter &+= 1
+            entry.lastAccess = accessCounter
+            fine[bucket] = entry
+            return entry.image
+        }
+
+        // Tier 3: In-memory nearest RAM thumbnail (coarse bucket fallback)
+        if let nearest = coarse.min(by: {
+            abs($0.value.seconds - seconds) < abs($1.value.seconds - seconds)
+        }), HybridSeekThumbnailPolicy.acceptsCoarse(
+            sampleSeconds: nearest.value.seconds,
+            targetSeconds: seconds,
+            duration: duration
+        ) {
+            accessCounter &+= 1
+            var entry = nearest.value
+            entry.lastAccess = accessCounter
+            coarse[nearest.key] = entry
+            return entry.image
+        }
+
+        // Tier 4: Persistent Disk Cache (~0.5ms memory-mapped read)
+        if !streamKey.isEmpty {
+            let tolerance = HybridSeekThumbnailPolicy.coarseLookupTolerance(duration: duration)
+            if let diskHit = await TrickplayDiskCache.shared.lookupWithTimestamp(streamKey: streamKey, seconds: seconds, tolerance: tolerance) {
+                // Promote to in-memory cache using actual disk frame timestamp
+                let kind: Kind = abs(diskHit.seconds - seconds) <= HybridSeekThumbnailPolicy.maximumPreviewTimeError ? .fine : .coarse
+                self.store(diskHit.image, seconds: diskHit.seconds, kind: kind, generation: generation, persistToDisk: false)
+                return diskHit.image
+            }
+        }
+
+        return nil
+    }
+
+    func hasCoarse(at seconds: Double, generation: UInt64) -> Bool {
+        guard self.generation == generation else { return false }
+        return coarse.values.contains { abs($0.seconds - seconds) < 0.01 }
+    }
+
+    func store(
+        _ image: CGImage,
+        seconds: Double,
+        kind: Kind,
+        generation: UInt64,
+        persistToDisk: Bool = true
+    ) {
+        guard self.generation == generation, seconds.isFinite else { return }
+        let cost = max(1, image.width * image.height * 4)
+        guard cost <= byteLimit else { return }
+        accessCounter &+= 1
+        let entry = Entry(image: image, seconds: seconds, kind: kind, cost: cost, lastAccess: accessCounter)
+        switch kind {
+        case .fine:
+            guard let bucket = HybridSeekThumbnailPolicy.fineBucket(for: seconds) else { return }
+            if let old = fine.updateValue(entry, forKey: bucket) { totalCost -= old.cost }
+        case .coarse:
+            let key = Int((seconds * 1000).rounded())
+            if let old = coarse.updateValue(entry, forKey: key) { totalCost -= old.cost }
+        }
+        totalCost += cost
+        evictIfNeeded()
+
+        if persistToDisk, !streamKey.isEmpty {
+            let key = streamKey
+            Task {
+                await TrickplayDiskCache.shared.store(image: image, streamKey: key, seconds: seconds)
+            }
+        }
+    }
+
+    private func evictIfNeeded() {
+        while totalCost > byteLimit || fine.count + coarse.count > entryLimit {
+            let fineCandidate = fine.min { $0.value.lastAccess < $1.value.lastAccess }
+            let coarseCandidate = coarse.min { $0.value.lastAccess < $1.value.lastAccess }
+            guard let fineCandidate, let coarseCandidate else {
+                if let fineCandidate {
+                    totalCost -= fine.removeValue(forKey: fineCandidate.key)?.cost ?? 0
+                } else if let coarseCandidate {
+                    totalCost -= coarse.removeValue(forKey: coarseCandidate.key)?.cost ?? 0
+                }
+                continue
+            }
+            if fineCandidate.value.lastAccess <= coarseCandidate.value.lastAccess {
+                totalCost -= fine.removeValue(forKey: fineCandidate.key)?.cost ?? 0
+            } else {
+                totalCost -= coarse.removeValue(forKey: coarseCandidate.key)?.cost ?? 0
+            }
+        }
+    }
+}
+
 /// Long-lived wrapper around a single `AetherEngine` instance (reused across titles).
 @MainActor
-final class AetherPlaybackController: UIViewController, PlaybackEngineControlling {
+final class AetherPlaybackController: UIViewController, PlaybackEngineControlling, ScrubThumbnailProviding {
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
     /// Terminal load/runtime failures the coordinator may use for MPV fallback.
     var onTerminalError: ((String) -> Void)?
@@ -1554,6 +2351,10 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var didReportTerminalError = false
     private var sourceProbe: SourceProbe?
     private var subtitleDelaySeconds: Double = 0
+    private var lastPassiveCaptureTime: Double = -100
+    private var isPerformingPassiveCapture = false
+    private(set) var contentCanonicalKey: String?
+    private var currentStreamKey: String = ""
     private var aiSubtitleStartupHoldCueID: Int?
     private var aiSubtitleStartupHoldTimeoutTask: Task<Void, Never>?
     private var didAttemptAISubtitleStartupHold = false
@@ -1562,6 +2363,21 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var playbackWasPlayingBeforeBackground = false
     private var foregroundReloadTask: Task<Void, Never>?
     private var lifecycleReloadToken: UInt64 = 0
+    /// Software playback has no SegmentCache-backed still source. Keep one
+    /// session-scoped extractor for that route instead of creating a decoder
+    /// for every scrub target.
+    private var softwareFrameExtractor: FrameExtractor?
+    private var didPrewarmSoftwareFrameExtractor = false
+    private var didLogSoftwareThumbnailResult = false
+    private let hybridThumbnailIndex = HybridSeekThumbnailIndex()
+    private var coarseThumbnailTask: Task<Void, Never>?
+    private var coarseThumbnailTaskToken: UInt64 = 0
+    private var coarseSampleTimes: [Double] = []
+    private var coarseSampleCursor = 0
+    private var coarseResumeNotBefore = Date.distantPast
+    private var coarseThumbnailUnavailable = false
+    private var coarseThumbnailComplete = false
+    private var isRemoteStream = false
 
     // MARK: PlaybackEngineControlling surface
 
@@ -1584,6 +2400,264 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private(set) var subtitleCues: [SubtitleCue] = []
     private(set) var capabilities = PlaybackEngineCapabilities.aether
     var isPictureInPictureActive: Bool { engine.pictureInPictureActive }
+
+    /// True when the active Aether session can provide a scrub still. Native
+    /// cache-backed stills stay the first choice; software video uses one
+    /// retained independent FrameExtractor.
+    var supportsScrubThumbnails: Bool {
+        engine.supportsCacheBackedStills || (!isRemoteStream && engine.playbackBackend == .software)
+    }
+
+    /// Lazily opens the retained extractor so the first visible scrub
+    /// request does not pay the demuxer-open cost.
+    func prepareScrubThumbnailExtractor() {
+        guard !isRemoteStream else { return }
+        guard !didPrewarmSoftwareFrameExtractor else { return }
+        let extractor: FrameExtractor
+        if let softwareFrameExtractor {
+            extractor = softwareFrameExtractor
+        } else {
+            guard let created = engine.makeFrameExtractor() else {
+                print("[Aether] Scrub thumbnail prewarm unavailable")
+                return
+            }
+            softwareFrameExtractor = created
+            extractor = created
+            didLogSoftwareThumbnailResult = false
+            print("[Aether] Created scrub thumbnail extractor for prewarm")
+        }
+        didPrewarmSoftwareFrameExtractor = true
+        let generation = loadGeneration
+        Task { @MainActor [weak self] in
+            await extractor.prewarm()
+            guard let self, self.loadGeneration == generation else { return }
+        }
+    }
+
+    func cachedScrubThumbnail(atSeconds seconds: Double, duration: Double) async -> CGImage? {
+        await hybridThumbnailIndex.lookup(
+            seconds: seconds,
+            duration: duration,
+            generation: loadGeneration
+        )
+    }
+
+    func scrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int = 360,
+        precise: Bool = true
+    ) async -> CGImage? {
+        let generation = loadGeneration
+        if engine.supportsCacheBackedStills {
+            let image = await engine.scrubThumbnail(
+                atSeconds: seconds, maxWidth: maxWidth, precise: precise
+            )
+            guard loadGeneration == generation else { return nil }
+            if let image {
+                await hybridThumbnailIndex.store(
+                    image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation
+                )
+                return image
+            }
+        }
+
+        guard loadGeneration == generation else { return nil }
+        let extractor: FrameExtractor
+        if let softwareFrameExtractor {
+            extractor = softwareFrameExtractor
+        } else {
+            guard let created = engine.makeFrameExtractor() else {
+                print("[Aether] Scrub thumbnail fallback extractor unavailable")
+                return nil
+            }
+            softwareFrameExtractor = created
+            extractor = created
+            didLogSoftwareThumbnailResult = false
+            print("[Aether] Created scrub thumbnail fallback extractor")
+        }
+        let image: CGImage?
+        if precise {
+            image = await extractor.preciseThumbnail(at: seconds, maxWidth: maxWidth)
+        } else {
+            image = await extractor.thumbnail(at: seconds, maxWidth: maxWidth)
+        }
+        guard loadGeneration == generation, softwareFrameExtractor != nil else { return nil }
+        if image == nil, !didLogSoftwareThumbnailResult {
+            print("[Aether] Scrub thumbnail fallback extraction produced nil at \(seconds)s")
+            didLogSoftwareThumbnailResult = true
+        }
+        if let image {
+            await hybridThumbnailIndex.store(
+                image, seconds: seconds, kind: precise ? .fine : .coarse, generation: generation
+            )
+        }
+        return image
+    }
+
+    private func resetSoftwareFrameExtractor() {
+        let extractor = softwareFrameExtractor
+        softwareFrameExtractor = nil
+        didPrewarmSoftwareFrameExtractor = false
+        guard let extractor else { return }
+        Task { await extractor.shutdown() }
+    }
+
+    private func resetHybridThumbnailState(generation: UInt64, streamKey: String = "") {
+        lastPassiveCaptureTime = -100
+        isPerformingPassiveCapture = false
+        coarseThumbnailTaskToken &+= 1
+        coarseThumbnailTask?.cancel()
+        coarseThumbnailTask = nil
+        coarseSampleTimes = []
+        coarseSampleCursor = 0
+        coarseResumeNotBefore = Date().addingTimeInterval(3)
+        coarseThumbnailUnavailable = false
+        coarseThumbnailComplete = false
+        Task { await hybridThumbnailIndex.reset(generation: generation, streamKey: streamKey) }
+    }
+
+    func setExternalTrickplayProvider(_ provider: (any TrickplayProviding)?) {
+        Task { await hybridThumbnailIndex.setExternalTrickplayProvider(provider) }
+    }
+
+    /// Passively harvests stills into the local trickplay cache during normal playback.
+    /// Operates directly on the decoded presentation buffer in GPU/VRAM:
+    /// 0 additional HTTP requests, 0 secondary demuxers, 0 secondary decoders.
+    private func recordPassivePlaybackThumbnailIfNeeded(atSeconds sourceTime: Double) {
+        guard sourceTime.isFinite, sourceTime >= 0 else { return }
+        guard isTransportPlaying, isPlayerPlaying, !isPlayerLoading else { return }
+        guard Date() >= coarseResumeNotBefore else { return }
+        guard abs(sourceTime - lastPassiveCaptureTime) >= 10.0 else { return }
+        guard !isPerformingPassiveCapture else { return }
+
+        lastPassiveCaptureTime = sourceTime
+        isPerformingPassiveCapture = true
+        let generation = self.loadGeneration
+        let targetSeconds = sourceTime
+
+        // Capture already-decoded video frame directly from active display pipeline
+        guard let capturedImage = engine.captureCurrentVideoFrame(maxWidth: 320) else {
+            isPerformingPassiveCapture = false
+            return
+        }
+
+        let key = self.contentCanonicalKey ?? self.currentStreamKey
+        Task { [weak self] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.isPerformingPassiveCapture = false
+                }
+            }
+            guard let self, self.loadGeneration == generation else { return }
+
+            // Store directly in RAM coarse cache
+            await self.hybridThumbnailIndex.store(
+                capturedImage,
+                seconds: targetSeconds,
+                kind: .coarse,
+                generation: generation,
+                persistToDisk: false
+            )
+
+            // Persist to disk store in background
+            if !key.isEmpty {
+                await TrickplayDiskCache.shared.store(
+                    image: capturedImage,
+                    streamKey: key,
+                    seconds: targetSeconds
+                )
+            }
+        }
+    }
+
+    /// Stop coarse work immediately when a user starts seeking. The software
+    /// extractor is retained so its next foreground request supersedes the
+    /// canceled coarse decode.
+    func suspendCoarseThumbnailWork() {
+        coarseThumbnailTaskToken &+= 1
+        coarseThumbnailTask?.cancel()
+        coarseThumbnailTask = nil
+        coarseResumeNotBefore = Date().addingTimeInterval(2)
+    }
+
+    func advanceCoarseThumbnailIfNeeded(duration: Double) {
+        guard !isRemoteStream else { return }
+        guard duration >= HybridSeekThumbnailPolicy.coarseIntervalSeconds,
+              Date() >= coarseResumeNotBefore,
+              !coarseThumbnailUnavailable,
+              coarseThumbnailTask == nil,
+              engine.playbackBackend == .software else { return }
+        let samples = HybridSeekThumbnailPolicy.coarseSampleTimes(duration: duration)
+        guard !samples.isEmpty else { return }
+        if coarseSampleTimes.count != samples.count ||
+           coarseSampleTimes.last != samples.last {
+            coarseSampleTimes = samples
+            coarseSampleCursor = 0
+            coarseThumbnailComplete = false
+        }
+        guard !coarseThumbnailComplete,
+              coarseSampleCursor < coarseSampleTimes.count else {
+            coarseThumbnailComplete = true
+            return
+        }
+        let token = coarseThumbnailTaskToken
+        let generation = loadGeneration
+        coarseThumbnailTask = Task { @MainActor [weak self] in
+            defer {
+                if let self, self.coarseThumbnailTaskToken == token {
+                    self.coarseThumbnailTask = nil
+                }
+            }
+            guard let self else { return }
+            var cursor = self.coarseSampleCursor
+            while cursor < self.coarseSampleTimes.count,
+                  await self.hybridThumbnailIndex.hasCoarse(
+                      at: self.coarseSampleTimes[cursor], generation: generation
+                  ) {
+                cursor += 1
+            }
+            self.coarseSampleCursor = cursor
+            if cursor >= self.coarseSampleTimes.count {
+                self.coarseThumbnailComplete = true
+                return
+            }
+            guard cursor < self.coarseSampleTimes.count,
+                  !Task.isCancelled,
+                  self.coarseThumbnailTaskToken == token,
+                  self.loadGeneration == generation else { return }
+            let seconds = self.coarseSampleTimes[cursor]
+            let extractor: FrameExtractor
+            if let existing = self.softwareFrameExtractor {
+                extractor = existing
+            } else {
+                guard let created = self.engine.makeFrameExtractor() else {
+                    self.coarseThumbnailUnavailable = true
+                    self.coarseResumeNotBefore = Date().addingTimeInterval(10)
+                    return
+                }
+                self.softwareFrameExtractor = created
+                extractor = created
+            }
+            // The extractor cache keys omit output size; match the foreground
+            // card so prefetch cannot leave a lower-resolution cached still.
+            let image = await extractor.preciseThumbnail(at: seconds, maxWidth: 480)
+            guard !Task.isCancelled,
+                  self.coarseThumbnailTaskToken == token,
+                  self.loadGeneration == generation else { return }
+            self.coarseResumeNotBefore = Date().addingTimeInterval(1)
+            if let image {
+                await self.hybridThumbnailIndex.store(
+                    image, seconds: seconds, kind: .coarse, generation: generation
+                )
+            }
+            // A nil is a completed attempt for this sample, not a reason to
+            // retry forever; move on and let later samples provide coverage.
+            self.coarseSampleCursor = cursor + 1
+            if self.coarseSampleCursor >= self.coarseSampleTimes.count {
+                self.coarseThumbnailComplete = true
+            }
+        }
+    }
 
     var playbackDebugInfo: PlaybackDebugInfo {
         let width = Int(engine.sourceVideoWidth > 0 ? engine.sourceVideoWidth : sourceProbe?.videoWidth ?? 0)
@@ -1835,6 +2909,12 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         )
         NotificationCenter.default.addObserver(
             self,
+            selector: #selector(appWillResignActive),
+            name: UIApplication.willResignActiveNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
             selector: #selector(appDidBecomeActive),
             name: UIApplication.didBecomeActiveNotification,
             object: nil
@@ -1872,6 +2952,13 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         NotificationCenter.default.removeObserver(self)
     }
 
+    @objc private func appWillResignActive() {
+        if !engine.pictureInPictureActive {
+            foregroundReloadTask?.cancel()
+            foregroundReloadTask = nil
+        }
+    }
+
     @objc private func appDidEnterBackground() {
         let pos = lastKnownPositionMs
         let dur = lastKnownDurationMs
@@ -1887,6 +2974,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     @objc private func appDidBecomeActive() {
+        guard UIApplication.shared.applicationState == .active else { return }
         guard needsForegroundReload,
               foregroundReloadTask == nil else { return }
 
@@ -1985,6 +3073,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
                     cues: self.subtitleCues,
                     sourceTime: sourceTime - self.subtitleDelaySeconds
                 )
+                self.recordPassivePlaybackThumbnailIfNeeded(atSeconds: sourceTime)
             }
             .store(in: &cancellables)
 
@@ -2064,12 +3153,16 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             isPlayerLoading = false
             isPlayerPlaying = false
             isPlayerEnded = false
-        case .seeking, .rebuffering:
+        case .seeking:
             isPlayerLoading = true
-            // Keep last isPlayerPlaying so UI does not flicker pause icons.
-        case .stalled:
-            // A reader reconnect over still-buffered media leaves the picture rolling.
-            isPlayerLoading = !isPlayerPlaying || engineIsBuffering
+            isPlayerPlaying = false
+        case .rebuffering, .stalled:
+            // Only flag loading if playback has actually halted / stopped.
+            // If frames are still actively rolling (isTransportPlaying / isPlayerPlaying),
+            // keep loading hidden so the spinner does not obscure rolling video.
+            let isActivelyPlaying = isTransportPlaying || isPlayerPlaying
+            isPlayerLoading = !isActivelyPlaying
+            isPlayerPlaying = isActivelyPlaying
         case .ended:
             isPlayerLoading = false
             isPlayerPlaying = false
@@ -2224,6 +3317,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     // MARK: Load
 
     func load(_ request: PlaybackLoadRequest, generation: UInt64) {
+        resetSoftwareFrameExtractor()
         lifecycleReloadToken &+= 1
         needsForegroundReload = false
         playbackWasPlayingBeforeBackground = false
@@ -2231,6 +3325,21 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         foregroundReloadTask = nil
         resetAISubtitleStartupHold()
         loadGeneration = generation
+        let isRemote = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
+        self.isRemoteStream = isRemote
+        let streamKey = request.canonicalMediaKey
+            ?? TrickplayDiskCache.streamKey(for: request.videoURL.absoluteString)
+        self.currentStreamKey = streamKey
+        self.contentCanonicalKey = request.canonicalMediaKey ?? streamKey
+        resetHybridThumbnailState(generation: generation, streamKey: streamKey)
+        if let trickplayURL = request.trickplayURL {
+            Task { [weak self, generation] in
+                if let provider = await TrickplayResolver.shared.fetchStoryboard(from: trickplayURL) {
+                    guard let self, self.loadGeneration == generation else { return }
+                    self.setExternalTrickplayProvider(provider)
+                }
+            }
+        }
         subtitleDelaySeconds = request.subtitleDelaySeconds
         didReportTerminalError = false
         isPlayerLoading = true
@@ -2291,6 +3400,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             audioBridgeMode: .surroundCompat,
             preserveASSMarkup: false,
             prepareNativeSubtitles: false,
+            maxConcurrentSourceRequests: isRemote ? 1 : nil,
             preferredAudioLanguages: request.preferredAudioLanguages,
             preferredSubtitleLanguages: request.preferredSubtitleLanguages,
             externalSubtitles: externalRegistration.tracks,
@@ -2465,6 +3575,14 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     }
 
     func destroyPlayer() {
+        if let key = contentCanonicalKey {
+            let durationSec = Double(durationMs) / 1000.0
+            Task.detached(priority: .utility) {
+                await TrickplayUploader.shared.uploadIfEligible(canonicalKey: key, duration: durationSec)
+            }
+        }
+        contentCanonicalKey = nil
+        resetSoftwareFrameExtractor()
         lifecycleReloadToken &+= 1
         needsForegroundReload = false
         playbackWasPlayingBeforeBackground = false
@@ -2472,6 +3590,7 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         foregroundReloadTask = nil
         resetAISubtitleStartupHold()
         loadGeneration += 1
+        resetHybridThumbnailState(generation: loadGeneration)
         engine.pictureInPictureActive = false
         engine.stop(resetDisplayCriteria: true)
         subtitleCues = []

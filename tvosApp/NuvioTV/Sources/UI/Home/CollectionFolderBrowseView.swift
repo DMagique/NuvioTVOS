@@ -26,6 +26,11 @@ private struct CollectionFolderSourceLoad {
     let errorMessage: String?
 }
 
+private enum CollectionFolderLayout {
+    /// Modern Home standard leading margin: 80pt safe area + 48pt rowLeading = 128pt.
+    static let horizontalPadding: CGFloat = 128
+}
+
 /// Full-screen folder browser. Honors collection `viewMode`:
 /// - **Tabs** (`TABBED_GRID`): poster grid (optional source tabs + All).
 /// - **Rows** / **Follow layout**: Home-style horizontal catalog rows per source.
@@ -125,6 +130,8 @@ struct CollectionFolderBrowseView: View {
                 gridBrowser
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea(.container, edges: .horizontal)
         .onExitCommand(perform: onBack)
         .onAppear {
             TVHomeDebugTrace.log("collectionFolder.appear id=\(folder.id) title=\(collectionTitle)")
@@ -261,11 +268,15 @@ struct CollectionFolderBrowseView: View {
                     }
                 }
                 .padding(.bottom, 70)
+                #if os(tvOS)
+                .background(TVScrollViewFocusConfigurator())
+                #endif
             }
             .focusSection()
             .defaultFocusIfAvailable($focusedItemID, firstFocusID)
         }
-        .ignoresSafeArea(edges: .top)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea(.container, edges: [.horizontal, .top])
     }
 
     private var cinematicBackdrop: some View {
@@ -375,9 +386,9 @@ struct CollectionFolderBrowseView: View {
                 .frame(width: 520, height: 190)
             }
         }
-        .padding(.horizontal, TVLayout.rowLeading)
+        .padding(.horizontal, CollectionFolderLayout.horizontalPadding)
         .padding(.top, 72)
-        .frame(maxWidth: .infinity, minHeight: 390, alignment: .bottom)
+        .frame(maxWidth: .infinity, minHeight: 390, alignment: .bottomLeading)
     }
 
     private var cinematicCategoryLabel: String {
@@ -398,7 +409,7 @@ struct CollectionFolderBrowseView: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 60)
+        .padding(.horizontal, CollectionFolderLayout.horizontalPadding)
         .padding(.top, 48)
     }
 
@@ -423,7 +434,7 @@ struct CollectionFolderBrowseView: View {
                     }
                 }
             }
-            .padding(.horizontal, 60)
+            .padding(.horizontal, CollectionFolderLayout.horizontalPadding)
             .padding(.vertical, 8)
         }
         .scrollClipDisabledIfAvailable()
@@ -460,15 +471,20 @@ struct CollectionFolderBrowseView: View {
                                 onLongPress: onLongPress,
                                 onSelect: onSelect
                             )
+                            .equatable()
                         }
                     }
                     .padding(.top, 8)
                     .padding(.bottom, 60)
+                    #if os(tvOS)
+                    .background(TVScrollViewFocusConfigurator())
+                    #endif
                 }
                 .focusSection()
                 .defaultFocusIfAvailable($focusedItemID, firstFocusID)
             }
         }
+        .ignoresSafeArea(.container, edges: .horizontal)
     }
 
     private var gridContent: some View {
@@ -489,7 +505,7 @@ struct CollectionFolderBrowseView: View {
                 }
             }
             .padding(.top, 16)
-            .padding(.horizontal, 60)
+            .padding(.horizontal, CollectionFolderLayout.horizontalPadding)
 
             if isGridLoadingMore {
                 ProgressView()
@@ -503,6 +519,7 @@ struct CollectionFolderBrowseView: View {
         .focusSection()
         .defaultFocusIfAvailable($focusedItemID, firstFocusID)
         .id(selectedTabIndex)
+        .ignoresSafeArea(.container, edges: .horizontal)
     }
 
     private var firstFocusID: String? {
@@ -799,18 +816,9 @@ private struct CollectionFolderHomeStyleRow: View {
     @State private var landscapeFocusTask: Task<Void, Never>?
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
+    @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
     @AppStorage(SettingsKey.focusedPosterBackdropEnabled) private var focusedPosterBackdropEnabled = true
     @AppStorage(SettingsKey.focusedPosterBackdropDelay) private var focusedPosterBackdropDelay = 3
-
-    private var posterWidth: CGFloat {
-        layoutMode == "Compact" ? 170 : 210
-    }
-
-    private var rowSpacing: CGFloat {
-        layoutMode == "Compact" ? 22 : 28
-    }
-
-    private var step: CGFloat { posterWidth + rowSpacing }
 
     private var stripHeight: CGFloat {
         let imageHeight: CGFloat = layoutMode == "Compact" ? 255 : 315
@@ -819,12 +827,21 @@ private struct CollectionFolderHomeStyleRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.custom("Inter-Bold", size: 30))
-                .foregroundColor(.white)
-                .padding(.leading, TVLayout.rowLeading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .zIndex(1)
+            GeometryReader { geometry in
+                let localLeading = max(
+                    0,
+                    CollectionFolderLayout.horizontalPadding
+                        - geometry.frame(in: .global).minX
+                )
+
+                Text(title)
+                    .font(.custom("Inter-Bold", size: 30))
+                    .foregroundColor(.white)
+                    .padding(.leading, localLeading)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    .zIndex(1)
+            }
+            .frame(height: 36)
 
             cardStrip
                 .zIndex(0)
@@ -845,28 +862,40 @@ private struct CollectionFolderHomeStyleRow: View {
         }
     }
 
-    /// Same clipping-window + manual offset pattern as `TVCatalogRow.cardStrip`.
+    /// Horizontal scrolling strip matching Home's exact interactive spring animation.
     private var cardStrip: some View {
-        GeometryReader { geo in
-            let edgeInset = max(0, geo.frame(in: .global).minX)
-            let stripWidth = geo.size.width + edgeInset * 2
+        GeometryReader { geometry in
+            let edgeInset = max(0, geometry.frame(in: .global).minX)
+            let stripWidth = geometry.size.width + edgeInset * 2
             let rowHomeLayout = layoutMode
             let rowPosterLabels = showPosterLabels
             let rowSmoothFocus = smoothFocus
             let rowFocusHighlighter = focusHighlighter
-            let rowStep = (rowHomeLayout == "Compact" ? 170.0 : 210.0)
-                + (rowHomeLayout == "Compact" ? 22.0 : 28.0)
+            let rowFastNavigation = fastNavigation
+            let rowTileShape = items.first(where: { $0.tileShape != .poster })?.tileShape ?? .poster
+            let posterCardWidth = TVCollectionFolderCardLayout.cardWidth(shape: rowTileShape, layoutMode: rowHomeLayout)
+            let rowCardSpacing: CGFloat = rowHomeLayout == "Compact" ? 22.0 : 28.0
+            let rowStep = posterCardWidth + rowCardSpacing
 
-            HStack(alignment: .bottom, spacing: rowHomeLayout == "Compact" ? 22 : 28) {
+            HStack(alignment: .top, spacing: rowCardSpacing) {
                 ForEach(items) { item in
                     let cardKey = "\(rowId)\u{1}\(item.id)"
                     PosterCard(
                         meta: item,
-                        isLandscape: rowHomeLayout == "Modern" && landscapeFocusedId == cardKey,
+                        isLandscape: rowTileShape == .landscape || (rowHomeLayout == "Modern" && landscapeFocusedId == cardKey),
+                        isAlwaysLandscape: rowTileShape == .landscape || item.tileShape == .landscape,
+                        tileShape: item.tileShape != .poster ? item.tileShape : rowTileShape,
                         onFocus: { focused in
                             if let index = items.firstIndex(where: { $0.id == focused.id }) {
                                 if scrollIndex != index {
-                                    scrollIndex = index
+                                    let updateScroll = { scrollIndex = index }
+                                    if rowSmoothFocus && !rowFastNavigation {
+                                        withAnimation(TVHomeLayout.scrollAnimation) {
+                                            updateScroll()
+                                        }
+                                    } else {
+                                        updateScroll()
+                                    }
                                 }
                             }
                             onFocus(focused)
@@ -893,23 +922,22 @@ private struct CollectionFolderHomeStyleRow: View {
                 if isLoadingMore {
                     ProgressView()
                         .tint(.white)
-                        .frame(width: posterWidth, height: rowHomeLayout == "Compact" ? 255 : 315)
+                        .frame(width: posterCardWidth, height: rowHomeLayout == "Compact" ? 255 : 315)
                 }
             }
             .padding(.vertical, TVHomeLayout.stripVerticalPadding)
-            // Pin the focused card under the title (Home BringIntoViewSpec).
-            .offset(x: edgeInset + TVLayout.rowLeading - CGFloat(scrollIndex) * rowStep)
+            // Keep the first/focused card at the physical screen X=128 anchor.
+            // The final offset cancels any safe-area origin retained by the
+            // overlay's parent, so this works in both coordinate spaces.
+            .offset(x: CollectionFolderLayout.horizontalPadding - CGFloat(scrollIndex) * rowStep)
             .frame(
                 width: stripWidth,
-                height: (rowHomeLayout == "Compact" ? 255 : 315)
-                    + (rowPosterLabels ? 48 : 0)
-                    + TVHomeLayout.stripVerticalPadding * 2,
+                height: stripHeight,
                 alignment: .leading
             )
             .clipped()
             .offset(x: -edgeInset)
-            .animation(rowSmoothFocus ? TVHomeLayout.scrollAnimation : nil, value: scrollIndex)
-            .animation(rowSmoothFocus ? TVHomeLayout.scrollAnimation : nil, value: landscapeFocusedId)
+            .animation(rowSmoothFocus && !rowFastNavigation ? TVHomeLayout.scrollAnimation : nil, value: landscapeFocusedId)
         }
         .frame(height: stripHeight)
     }
@@ -958,6 +986,18 @@ private struct CollectionFolderHomeStyleRow: View {
         if landscapeFocusedId == cardKey {
             landscapeFocusedId = nil
         }
+    }
+}
+
+extension CollectionFolderHomeStyleRow: Equatable {
+    static func == (lhs: CollectionFolderHomeStyleRow, rhs: CollectionFolderHomeStyleRow) -> Bool {
+        lhs.id == rhs.id
+            && lhs.title == rhs.title
+            && lhs.items == rhs.items
+            && lhs.isLoadingMore == rhs.isLoadingMore
+            && lhs.layoutMode == rhs.layoutMode
+            && lhs.showPosterLabels == rhs.showPosterLabels
+            && lhs.watchedTitleKeys == rhs.watchedTitleKeys
     }
 }
 

@@ -34,7 +34,8 @@ enum MdbListProgressService {
         tokenStorage: MdbListTokenStorage = MdbListKeychainTokenStorage(),
         profileScope: String? = nil
     ) async -> Bool {
-        guard TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+        guard ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
               position.isFinite,
               duration.isFinite,
               position > 0,
@@ -60,7 +61,8 @@ enum MdbListProgressService {
                 method: .post,
                 body: try jsonData(body)
             )
-            guard (200..<300).contains(response.statusCode) else { return false }
+            guard (200..<300).contains(response.statusCode),
+                  ProfileSettings.isActiveStore(store) else { return false }
             invalidateWatchedSnapshot(for: profileScope ?? MdbListRuntimeSession.profileScope())
             NotificationCenter.default.post(
                 name: TraktSettingsStore.continueWatchingChangedNotification,
@@ -164,7 +166,8 @@ enum MdbListProgressService {
         profileScope: String? = nil
     ) async -> Bool {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
-        guard TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+        guard ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
               let body = scrobbleBody(
                 meta: item.meta,
                 progress: min(max(item.progress * 100, 0), 100),
@@ -186,7 +189,8 @@ enum MdbListProgressService {
                 method: .post,
                 body: try jsonData(body)
             )
-            guard (200..<300).contains(response.statusCode) || response.statusCode == 404 else {
+            guard ((200..<300).contains(response.statusCode) || response.statusCode == 404),
+                  ProfileSettings.isActiveStore(store) else {
                 return false
             }
             NotificationCenter.default.post(
@@ -209,7 +213,8 @@ enum MdbListProgressService {
     ) async -> Bool {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
         let startingProfile = (ProfileSettings.activeProfileID, WatchedStore.activeProfileId)
-        guard TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+        guard ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
               isAvailable(in: store, tokenStorage: tokenStorage, profileScope: scope) else {
             return false
         }
@@ -314,7 +319,8 @@ enum MdbListProgressService {
         profileScope: String? = nil
     ) async -> Bool {
         let scope = profileScope ?? MdbListRuntimeSession.profileScope()
-        guard TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
+        guard ProfileSettings.isActiveStore(store),
+              TraktSettingsStore.watchProgressSource(in: store) == .mdblist,
               let body = historyBody(
                 meta: meta,
                 season: season,

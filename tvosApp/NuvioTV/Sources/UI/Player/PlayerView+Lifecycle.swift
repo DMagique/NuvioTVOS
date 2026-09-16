@@ -26,6 +26,7 @@ extension PlayerView {
                 // without dropping the lock during buffering or source switches.
                 PlaybackWakeLock.acquire()
                 syncPlaybackWakeLock()
+                let cachedBinge = BingeGroupStore.load(seriesId: meta.id)
                 viewModel.load(
                     url: url,
                     meta: meta,
@@ -34,10 +35,12 @@ extension PlayerView {
                     externalSubtitles: externalSubtitles,
                     resumeFrom: resumeFrom,
                     playbackOrigin: playbackOrigin,
-                    addonName: addonName,
+                    bingeGroup: bingeGroup ?? cachedBinge?.bingeGroup,
+                    addonName: addonName ?? cachedBinge?.addonName,
                     provider: provider,
                     filename: filename,
-                    videoSize: videoSize
+                    videoSize: videoSize,
+                    trickplayURL: trickplayURL
                 )
                 if subtitle != PlaybackMarkers.trailerSubtitle {
                     viewModel.fetchExternalSubtitles(
@@ -117,9 +120,21 @@ extension PlayerView {
                 }
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active {
+                switch phase {
+                case .inactive, .background:
+                    if !PictureInPictureManager.shared.isPictureInPictureActive {
+                        viewModel.pause(forBackground: true)
+                    }
+                case .active:
                     lastBecameActiveAt = Date()
                     syncPlaybackWakeLock()
+                @unknown default:
+                    break
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+                if !PictureInPictureManager.shared.isPictureInPictureActive {
+                    viewModel.pause(forBackground: true)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in

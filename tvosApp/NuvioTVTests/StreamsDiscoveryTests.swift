@@ -560,4 +560,136 @@ final class StreamsDiscoveryTests: XCTestCase {
         // Non-matching id prefix should fail
         XCTAssertFalse(manifest.supportsResource("stream", type: "series", id: "kitsu:1234"))
     }
+
+    // MARK: - Stream Picker Pagination & Lazy Slicing
+
+    private func makePaginationTestStreams(count: Int, addon: String = "Torrentio") -> [NuvioStream] {
+        (1...count).map { i in
+            NuvioStream(
+                url: "https://example.com/stream\(i).mp4",
+                name: "Stream \(i) - 1080p",
+                description: "\(addon)\n\(i) GB",
+                addonName: addon
+            )
+        }
+    }
+
+    func testPaginatedSliceWithEmptyStreamsReturnsEmpty() {
+        let empty: [NuvioStream] = []
+        let slice = StreamPickerListBuilder.paginatedSlice(streams: empty, limit: 20)
+        XCTAssertTrue(slice.isEmpty)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: 0, currentLimit: 20))
+    }
+
+    func testPaginatedSliceWithZeroOrNegativeLimitReturnsEmpty() {
+        let streams = makePaginationTestStreams(count: 10)
+        XCTAssertTrue(StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 0).isEmpty)
+        XCTAssertTrue(StreamPickerListBuilder.paginatedSlice(streams: streams, limit: -5).isEmpty)
+    }
+
+    func testPaginatedSliceWithinFirstPage() {
+        let streams = makePaginationTestStreams(count: 50)
+        let page1 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(page1.count, 20)
+        XCTAssertEqual(page1.first?.name, "Stream 1 - 1080p")
+        XCTAssertEqual(page1.last?.name, "Stream 20 - 1080p")
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 20))
+    }
+
+    func testPaginatedSliceExpandingLimitLoadsNextPages() {
+        let streams = makePaginationTestStreams(count: 50)
+
+        let page1 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(page1.count, 20)
+
+        let page2 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 40)
+        XCTAssertEqual(page2.count, 40)
+        XCTAssertEqual(page2.first?.name, "Stream 1 - 1080p")
+        XCTAssertEqual(page2[19].name, "Stream 20 - 1080p")
+        XCTAssertEqual(page2[20].name, "Stream 21 - 1080p")
+        XCTAssertEqual(page2.last?.name, "Stream 40 - 1080p")
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 40))
+
+        let page3 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 60)
+        XCTAssertEqual(page3.count, 50)
+        XCTAssertEqual(page3.last?.name, "Stream 50 - 1080p")
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 60))
+    }
+
+    func testPaginatedSliceWithLimitExceedingTotalCount() {
+        let streams = makePaginationTestStreams(count: 7)
+        let slice = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(slice.count, 7)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 20))
+    }
+
+    func testPaginationWithDisplayedStreamsAndAddonFilter() {
+        let addon1Streams = makePaginationTestStreams(count: 30, addon: "Torrentio")
+        let addon2Streams = makePaginationTestStreams(count: 15, addon: "MediaFusion")
+        let allStreams = addon1Streams + addon2Streams
+
+        let group1 = AddonStreamGroup(
+            addonId: "torrentio",
+            displayName: "Torrentio",
+            streams: addon1Streams,
+            isLoading: false
+        )
+        let group2 = AddonStreamGroup(
+            addonId: "mediafusion",
+            displayName: "MediaFusion",
+            streams: addon2Streams,
+            isLoading: false
+        )
+
+        // All streams: 45 items total, 20 on first page
+        let allDisplayed = StreamPickerListBuilder.displayedStreams(
+            streams: allStreams,
+            groups: [group1, group2],
+            selectedAddonId: nil,
+            sortOption: .default,
+            includeDebrid: true
+        )
+        XCTAssertEqual(allDisplayed.count, 45)
+        let allPage1 = StreamPickerListBuilder.paginatedSlice(streams: allDisplayed, limit: 20)
+        XCTAssertEqual(allPage1.count, 20)
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: allDisplayed.count, currentLimit: 20))
+
+        // Filter by MediaFusion: 15 items total, 15 on first page (hasMore is false)
+        let filteredDisplayed = StreamPickerListBuilder.displayedStreams(
+            streams: allStreams,
+            groups: [group1, group2],
+            selectedAddonId: "mediafusion",
+            sortOption: .default,
+            includeDebrid: true
+        )
+        XCTAssertEqual(filteredDisplayed.count, 15)
+        let filteredPage1 = StreamPickerListBuilder.paginatedSlice(streams: filteredDisplayed, limit: 20)
+        XCTAssertEqual(filteredPage1.count, 15)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: filteredDisplayed.count, currentLimit: 20))
+    }
+
+    func testSmartPlaybackSelectorEvaluatesFullStreamPool() {
+        // Construct 50 streams where only stream 48 has a 4K resolution
+        let streams = (1...50).map { i in
+            NuvioStream(
+                url: "https://example.com/stream\(i).mp4",
+                name: i == 48 ? "Movie 4K UHD Remux" : "Movie 720p WEB-DL",
+                description: "Size \(i) GB",
+                addonName: "Torrentio"
+            )
+        }
+
+        // Auto-play selector must be able to select the 4K stream regardless of UI page limit
+        let best = SmartPlaybackSelector.bestStream(
+            from: streams,
+            qualityPreference: "Highest",
+            subtitleLanguages: [],
+            shouldMatchSubtitles: false,
+            includeDebrid: true,
+            cachedOnly: false
+        )
+        XCTAssertNotNil(best)
+        XCTAssertEqual(best?.name, "Movie 4K UHD Remux")
+    }
 }
+

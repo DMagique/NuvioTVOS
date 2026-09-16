@@ -416,6 +416,9 @@ enum WatchProgressLedger {
         )
         guard let data = try? JSONEncoder().encode(trimmed) else { return false }
         let key = storageKey
+        if cachedKey == key, let cachedRecords, cachedRecords == trimmed {
+            return true
+        }
         guard LargePayloadStore.write(data, key: key, directory: storageDirectoryName) else {
             // No preferences fallback: the ledger shares its budget with every
             // other key in the plist, and an oversized write aborts the process.

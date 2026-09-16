@@ -10,6 +10,8 @@ import Foundation
 /// Nuvio account API credentials for the account / TV-login system.
 enum AuthConfig {
     static let officialAPIBaseURL = "https://api.nuvio.tv"
+    static let officialTvLoginWebBaseURL = "https://nuvio.tv/tv-login"
+    static let legacyTvLoginWebBaseURL = "https://app.nuvio.tv/tv-login"
 
     /// Public publishable key from the Nuvio Public API docs.
     static let officialPublishableKey = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN"
@@ -38,9 +40,8 @@ enum AuthConfig {
     /// `web_url` to encode in the QR code, so this is only a fallback hint.
     static var tvLoginWebBaseURL: String {
         if isCustom { return currentConfiguration.normalizedBackendURL + "/tv-login" }
-        return "https://nuvio.tv/tv-login"
+        return officialTvLoginWebBaseURL
     }
-    static let legacyTvLoginWebBaseURL = "https://app.nuvio.tv/tv-login"
 
     static var isConfigured: Bool {
         !apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&

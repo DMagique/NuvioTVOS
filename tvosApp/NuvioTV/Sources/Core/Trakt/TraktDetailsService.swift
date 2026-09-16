@@ -24,7 +24,7 @@ enum TraktDetailsService {
     private static let pageLimit = 5
 
     static var isAuthenticated: Bool {
-        TraktAuthStore.state.isAuthenticated
+        TraktAuthStore.isAuthenticated
     }
 
     static var commentsEnabled: Bool {
