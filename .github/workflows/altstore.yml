@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Fetch releases and build JSON
         env:
@@ -57,5 +59,5 @@ jobs:
             echo "No updates to apps.json."
           else
             git commit -m "chore(altstore): sync releases to apps.json [skip ci]"
-            git push
+            git push origin main
           fi
