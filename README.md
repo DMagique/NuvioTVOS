@@ -48,22 +48,22 @@ Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.3.6** is the latest tvOS release.
+**Beta 3.3.7** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.6/NuvioTV-3.3.6-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.6) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.7/NuvioTV-3.3.7-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.7) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 100+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 100+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.3.6
+### New in Beta 3.3.7
 
-- **Binge-Watching Stream Auto-Select:** Automatically matches and selects the stream from the identical release group (e.g. *Framestor*, *NTb*, *FLUX*) when auto-playing next episodes.
-- **Live Scrubber Thumbnail Previews:** Hover thumbnail bubble renders live video frame previews during remote scrub bar navigation.
-- **Player Controls & Remote Gestures Overhaul:** Siri Remote clickpad center tap play/pause toggle, jump seeking, chapter skipping, and quick-access side panels.
-- **Home Catalog & Collection Folder Performance:** Butter-smooth 60fps lazy row scrolling and reliable deferred focus restoration on collection folders.
-- **Native Search & Dictation Polish:** Refined native tvOS keyboard host with active Siri voice dictation support.
+- **High-Throughput Stream Caching:** Integrated local disk and memory proxy server to pre-buffer media segments with customizable cache ceilings.
+- **Direct Jellyfin & SMB Media Indexing:** Enhanced directory traversal, metadata matching, and resume point sync for local SMB shares and Jellyfin servers.
+- **Intro & Outro Auto-Skip:** Automated skip triggers powered by IntroDB integration for seamless series binge-watching.
+- **Playback Engine & Buffering Polish:** Hardened controller lifecycles and seamless recovery from momentary network fluctuations.
+- **AltStore, SideStore & Feather Repository Feed:** Updated `apps.json` multi-source feed with complete release history and verified bundle sizes.
 
 ### Built-in Player
 
