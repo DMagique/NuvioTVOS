@@ -93,27 +93,41 @@ public struct TopShelfFeed: Codable, Equatable {
 /// group container isn't available (e.g. entitlement not provisioned), so the
 /// app never crashes or blocks on it.
 public enum TopShelfFeedStore {
-    private static let feedKey = "nuvio.tv.topShelf.feed"
+    private static let feedFileName = "feed.json"
     private static let artworkRenderVersion = 2
 
-    private static var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: topShelfAppGroupID)
+    /// True when the shared App Group directory actually exists on this device.
+    /// Accessing `UserDefaults(suiteName:)` on an unprovisioned App Group causes
+    /// cfprefsd to detach and hang on subsequent IPC locks. Using direct container
+    /// files completely bypasses cfprefsd and avoids IPC stalls.
+    public static var isAvailable: Bool {
+        FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: topShelfAppGroupID
+        ) != nil
+    }
+
+    private static var feedFileURL: URL? {
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: topShelfAppGroupID
+        ) else { return nil }
+        return container.appendingPathComponent(feedFileName)
     }
 
     /// Called by the app whenever Continue Watching changes.
     public static func write(_ entries: [TopShelfEntry]) {
-        let decoratedEntries = entries.map { entry in
-            guard entry.imageURL != nil, entry.subtitle != nil else { return entry }
-            return entry.withArtworkFileName(artworkFileName(for: entry))
-        }
-        writeFeed(decoratedEntries)
+        guard isAvailable else { return }
+        Task.detached(priority: .utility) {
+            let decoratedEntries = entries.map { entry in
+                guard entry.imageURL != nil, entry.subtitle != nil else { return entry }
+                return entry.withArtworkFileName(artworkFileName(for: entry))
+            }
+            writeFeed(decoratedEntries)
 
-        #if canImport(UIKit)
-        Task { @MainActor in
+            #if canImport(UIKit)
             await cacheArtwork(for: decoratedEntries)
+            #endif
+            notifyTopShelfContentChanged()
         }
-        #endif
-        notifyTopShelfContentChanged()
     }
 
     /// Resolves a rendered artwork file that both the app and extension can
@@ -128,10 +142,10 @@ public enum TopShelfFeedStore {
     }
 
     private static func writeFeed(_ entries: [TopShelfEntry]) {
-        guard let defaults = sharedDefaults else { return }
+        guard let url = feedFileURL else { return }
         let feed = TopShelfFeed(entries: entries)
         guard let data = try? JSONEncoder().encode(feed) else { return }
-        defaults.set(data, forKey: feedKey)
+        try? data.write(to: url, options: .atomic)
     }
 
     private static func artworkFileName(for entry: TopShelfEntry) -> String {
@@ -157,7 +171,6 @@ public enum TopShelfFeedStore {
     }
 
     #if canImport(UIKit)
-    @MainActor
     private static func cacheArtwork(for entries: [TopShelfEntry]) async {
         #if DEBUG
         let start = DispatchTime.now().uptimeNanoseconds
@@ -258,8 +271,8 @@ public enum TopShelfFeedStore {
 
     /// Called by the Top Shelf extension to build the row.
     public static func read() -> TopShelfFeed? {
-        guard let defaults = sharedDefaults,
-              let data = defaults.data(forKey: feedKey),
+        guard let url = feedFileURL,
+              let data = try? Data(contentsOf: url),
               let feed = try? JSONDecoder().decode(TopShelfFeed.self, from: data) else {
             return nil
         }

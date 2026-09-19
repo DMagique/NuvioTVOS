@@ -220,8 +220,9 @@ extension PlaybackPhase {
             // reserved for an underrun after playback existed. A paused mount stays `.paused`: it is
             // honestly not playing rather than still arriving.
             if !transportHasRolled, state != .paused { return .loading }
+            if state == .paused { return .paused }
             if isBuffering { return .rebuffering }
-            return state == .paused ? .paused : .playing
+            return .playing
         }
     }
 }

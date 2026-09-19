@@ -87,18 +87,33 @@ public struct WatchedItem: Equatable, Hashable, Identifiable {
 
 // MARK: - ProfileManager
 
+public enum ProfileManagerError: LocalizedError, Equatable {
+    case maxProfilesReached
+
+    public var errorDescription: String? {
+        switch self {
+        case .maxProfilesReached:
+            return "You've reached the maximum of 6 profiles. Remove one to create another."
+        }
+    }
+}
+
 /// Pure Swift profile store and selection state.
 public class ProfileManager {
     static let profilesChangedNotification = Notification.Name("nuvio.tv.profiles.changed")
 
     private static let profilesKey = "nuvio.profiles"
     private static let activePinKey = "nuvio.active_profile_id"
-    private static let maxProfiles = 6
+    public static let maxProfiles = 6
     private static let maxProfileIdCharacters = 64
     private static let maxProfileNameCharacters = 80
     // Catalog ids are short, but web-panel avatar URLs may include long query
     // strings (for example signed image links).
     private static let maxAvatarIdCharacters = 2048
+
+    public var canCreateProfile: Bool {
+        ((try? getProfiles())?.count ?? 0) < Self.maxProfiles
+    }
 
     private let profilesURL: URL?
 
@@ -156,6 +171,9 @@ public class ProfileManager {
 
     public func createProfile(input: CreateProfileInput) throws -> Profile {
         var profiles = (try? getProfiles()) ?? []
+        guard profiles.count < Self.maxProfiles else {
+            throw ProfileManagerError.maxProfilesReached
+        }
         let id = nextProfileId(in: profiles)
         let pin = try Self.validatedPin(input.pin)
         let profile = Profile(
@@ -540,6 +558,13 @@ public class ProfileViewModel: ObservableObject {
     @Published public var isLoading = false
     @Published public var pendingProfileId: String?
 
+    public var canAddProfile: Bool {
+        guard let manager = profileManager else {
+            return profiles.count < ProfileManager.maxProfiles
+        }
+        return manager.canCreateProfile
+    }
+
     /// Fires only when the user explicitly picks a profile (who's-watching
     /// card or PIN confirmation) — never when a sync refreshes
     /// `activeProfile`. Screens navigate on this, not on `$activeProfile`.
@@ -746,6 +771,10 @@ public class ProfileViewModel: ObservableObject {
             profileCreationError = "Profiles are unavailable on this device."
             return
         }
+        guard canAddProfile else {
+            profileCreationError = ProfileManagerError.maxProfilesReached.errorDescription
+            return
+        }
         guard !isLoading else { return }
         isLoading = true
         profileCreationError = nil
@@ -760,7 +789,11 @@ public class ProfileViewModel: ObservableObject {
                 isLoading = false
                 onCreated?()
             } catch {
-                profileCreationError = "Couldn't save this profile: \(error.localizedDescription)"
+                if let managerError = error as? ProfileManagerError, managerError == .maxProfilesReached {
+                    profileCreationError = managerError.errorDescription
+                } else {
+                    profileCreationError = "Couldn't save this profile: \(error.localizedDescription)"
+                }
                 print("Failed to create profile: \(error)")
                 isLoading = false
             }

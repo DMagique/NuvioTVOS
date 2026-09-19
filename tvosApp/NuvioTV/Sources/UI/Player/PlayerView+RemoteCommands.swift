@@ -87,6 +87,19 @@ extension PlayerView {
                     }
                     return
                 }
+                if viewModel.showNextEpisodeCard && !viewModel.showControls {
+                    viewModel.dismissNextEpisodeCard()
+                    nextEpisodeFocused = false
+                    cancelAutoPlayFocused = false
+                    focusRemoteInput()
+                    return
+                }
+                if viewModel.showSkipSegmentCard && !viewModel.showControls {
+                    viewModel.dismissActiveInterval()
+                    skipSegmentFocused = false
+                    focusRemoteInput()
+                    return
+                }
                 if viewModel.showControls {
                     viewModel.hideControls()
                     return

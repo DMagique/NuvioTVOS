@@ -785,7 +785,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// than the historical window could hold; the quarter-of-free-space clamp, which is what actually
     /// protects the volume, always applies. Unknown capacity keeps the conservative cap either way.
     static func sessionRetentionBudgetBytes(volumeAvailableBytes: Int64?, capRelaxed: Bool = false) -> Int {
+        #if os(tvOS)
+        let cap = 256 << 20 // 256 MiB safe budget on tvOS to prevent jetsam kills with 4K VideoToolbox decoding
+        #else
         let cap = 2 << 30
+        #endif
         guard let available = volumeAvailableBytes else { return cap }
         let quarterOfFree = max(0, Int(available / 4))
         return capRelaxed ? quarterOfFree : min(cap, quarterOfFree)

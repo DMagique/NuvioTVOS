@@ -2362,6 +2362,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
     private var needsForegroundReload = false
     private var playbackWasPlayingBeforeBackground = false
     private var foregroundReloadTask: Task<Void, Never>?
+    private var artworkLoadTask: Task<Void, Never>?
+    private var nowPlayingInfo: [String: Any] = [:]
     private var lifecycleReloadToken: UInt64 = 0
     /// Software playback has no SegmentCache-backed still source. Keep one
     /// session-scoped extractor for that route instead of creating a decoder
@@ -2381,6 +2383,8 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
 
     // MARK: PlaybackEngineControlling surface
 
+    var onFirstFrameReady: (() -> Void)?
+    var hasFirstFrameReadyForDisplay: Bool { engine.hasFirstFrameReadyForDisplay }
     private(set) var audioTracks: [PlaybackTrackInfo] = []
     private(set) var subtitleTracks: [PlaybackTrackInfo] = []
     private(set) var isPlayerLoading = true
@@ -3053,6 +3057,16 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             }
             .store(in: &cancellables)
 
+        engine.$hasFirstFrameReadyForDisplay
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isReady in
+                guard let self else { return }
+                if isReady {
+                    self.onFirstFrameReady?()
+                }
+            }
+            .store(in: &cancellables)
+
         engine.clock.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
@@ -3157,12 +3171,18 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
             isPlayerLoading = true
             isPlayerPlaying = false
         case .rebuffering, .stalled:
-            // Only flag loading if playback has actually halted / stopped.
+            // Only flag loading if playback has actually halted / stopped while actively attempting to play.
             // If frames are still actively rolling (isTransportPlaying / isPlayerPlaying),
             // keep loading hidden so the spinner does not obscure rolling video.
-            let isActivelyPlaying = isTransportPlaying || isPlayerPlaying
-            isPlayerLoading = !isActivelyPlaying
-            isPlayerPlaying = isActivelyPlaying
+            // If the transport is intentionally paused, do NOT flag loading so pause doesn't show a spinner.
+            if !isTransportPlaying && engine.state == .paused {
+                isPlayerLoading = false
+                isPlayerPlaying = false
+            } else {
+                let isActivelyPlaying = isTransportPlaying || isPlayerPlaying
+                isPlayerLoading = !isActivelyPlaying
+                isPlayerPlaying = isActivelyPlaying
+            }
         case .ended:
             isPlayerLoading = false
             isPlayerPlaying = false
@@ -3360,8 +3380,24 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         if let subtitle = request.streamDescription, !subtitle.isEmpty {
             nowPlaying[MPMediaItemPropertyArtist] = subtitle
         }
+        nowPlaying[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue
+        nowPlayingInfo = nowPlaying
         if !nowPlaying.isEmpty {
             engine.setVideoNowPlayingInfo(nowPlaying)
+        }
+        artworkLoadTask?.cancel()
+        if let artworkURL = request.artworkURL {
+            artworkLoadTask = Task { [weak self, generation] in
+                guard let image = await BackdropImageCache.shared.image(for: artworkURL) else { return }
+                guard let self, self.loadGeneration == generation else { return }
+                #if os(tvOS) || os(iOS)
+                let artwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                var updated = self.nowPlayingInfo
+                updated[MPMediaItemPropertyArtwork] = artwork
+                self.nowPlayingInfo = updated
+                self.engine.setVideoNowPlayingInfo(updated)
+                #endif
+            }
         }
         #endif
         externalSubtitleURLsByTrackID = externalRegistration.urlsByTrackID
@@ -3588,6 +3624,9 @@ final class AetherPlaybackController: UIViewController, PlaybackEngineControllin
         playbackWasPlayingBeforeBackground = false
         foregroundReloadTask?.cancel()
         foregroundReloadTask = nil
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
+        nowPlayingInfo = [:]
         resetAISubtitleStartupHold()
         loadGeneration += 1
         resetHybridThumbnailState(generation: loadGeneration)

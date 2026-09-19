@@ -402,7 +402,19 @@ enum ExternalPlaybackSessionStore {
     private static let key = "nuvio.tv.externalPlaybackSession.v1"
 
     static func save(_ session: ExternalPlaybackSession, defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(session) else { return }
+        // A series meta can carry its entire episode guide. This handoff is a
+        // single-slot preference, so persist the compact form and never send a
+        // full guide to cfprefsd.
+        let compactSession = ExternalPlaybackSession(
+            id: session.id,
+            meta: session.meta.persistenceSnapshot,
+            sourceURL: session.sourceURL,
+            season: session.season,
+            episode: session.episode,
+            duration: session.duration,
+            profileID: session.profileID
+        )
+        guard let data = try? JSONEncoder().encode(compactSession) else { return }
         defaults.set(data, forKey: key)
     }
 
@@ -453,6 +465,7 @@ struct PreparedNextStream {
     var videoSize: Int64? = nil
     var provider: String? = nil
     var bingeGroup: String? = nil
+    var artworkURL: URL? = nil
 }
 
 struct PlayerTime: Equatable {

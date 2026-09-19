@@ -229,6 +229,9 @@ final class PlaybackSessionCoordinator: ObservableObject {
         statusToast = nil
         aetherController?.destroyPlayer()
         mpvController.destroyPlayer()
+        Task {
+            await PlaybackStreamCacheManager.shared.stopActiveSession()
+        }
     }
 
     func requestMPVForAudioControls(reason: String) {
@@ -287,6 +290,33 @@ final class PlaybackSessionCoordinator: ObservableObject {
             loadDispatcher(request, backend, generation)
             return
         }
+
+        let isDiskCacheEnabled = (ProfileSettings.current.object(forKey: SettingsKey.hybridDiskCacheEnabled) as? Bool) ?? true
+        let isHTTP = PlaybackBackendPolicy.isRemoteHTTP(request.videoURL.absoluteString)
+        let isHLS = request.videoURL.pathExtension.lowercased() == "m3u8"
+
+        if isDiskCacheEnabled && isHTTP && !isHLS {
+            Task { @MainActor [weak self] in
+                guard let self, !self.userStopped, self.loadGeneration == generation else { return }
+                var effectiveRequest = request
+                if let localURL = await PlaybackStreamCacheManager.shared.prepareCacheServer(
+                    for: request.videoURL,
+                    headers: request.httpHeaders
+                ) {
+                    effectiveRequest.videoURL = localURL
+                }
+                guard !self.userStopped, self.loadGeneration == generation else {
+                    await PlaybackStreamCacheManager.shared.stopActiveSession()
+                    return
+                }
+                self.dispatchToEngine(effectiveRequest, on: backend, generation: generation)
+            }
+        } else {
+            dispatchToEngine(request, on: backend, generation: generation)
+        }
+    }
+
+    private func dispatchToEngine(_ request: PlaybackLoadRequest, on backend: PlayerBackendKind, generation: UInt64) {
         switch backend {
         case .aether:
             guard let aetherController else {
@@ -310,6 +340,7 @@ final class PlaybackSessionCoordinator: ObservableObject {
 @MainActor
 private final class UnavailablePlaybackEngine: PlaybackEngineControlling {
     var onPlaybackSuspended: ((Int64, Int64) -> Void)?
+    var onFirstFrameReady: (() -> Void)?
     let audioTracks: [PlaybackTrackInfo] = []
     let subtitleTracks: [PlaybackTrackInfo] = []
     let isPlayerLoading = false
@@ -318,6 +349,7 @@ private final class UnavailablePlaybackEngine: PlaybackEngineControlling {
     let isPlayerEnded = false
     let isAtEndOfFile = false
     let hasCoherentTimeSample = false
+    let hasFirstFrameReadyForDisplay = false
     let durationMs: Int64 = 0
     let positionMs: Int64 = 0
     let bufferedMs: Int64 = 0

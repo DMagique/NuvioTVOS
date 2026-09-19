@@ -691,5 +691,99 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertNotNil(best)
         XCTAssertEqual(best?.name, "Movie 4K UHD Remux")
     }
+
+    // MARK: - AIOStreams Heterogeneous Decoding Resilience (#105)
+
+    func testAIOStreamsHeterogeneousResponseDecodesResiliently() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "AIOStream 1",
+                    "title": "Movie.2024.1080p.WEBRip",
+                    "url": "https://aiostreams.example/playback/rd/stream1.mkv",
+                    "fileIdx": "0",
+                    "sources": ["tracker:udp://tracker.example:6969", null],
+                    "behaviorHints": {
+                        "cached": 1,
+                        "videoSize": "2147483648",
+                        "proxyHeaders": {
+                            "request": {
+                                "User-Agent": "Nuvio/1.0",
+                                "Content-Length": 1024
+                            }
+                        },
+                        "storyboard": {
+                            "url": "https://aiostreams.example/storyboard.vtt"
+                        }
+                    }
+                },
+                {
+                    "name": "AIOStream 2",
+                    "title": "Movie.2024.2160p.HDR",
+                    "url": "https://aiostreams.example/playback/rd/stream2.mkv",
+                    "fileIdx": 2,
+                    "behaviorHints": {
+                        "isCached": "true",
+                        "videoSize": 5368709120.0,
+                        "storyboard": "https://aiostreams.example/storyboard2.vtt"
+                    }
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let streams = decoded.streams
+        XCTAssertNotNil(streams)
+        XCTAssertEqual(streams?.count, 2)
+
+        let s1 = try XCTUnwrap(streams?.first)
+        XCTAssertEqual(s1.fileIdx, 0)
+        XCTAssertEqual(s1.sources, ["tracker:udp://tracker.example:6969"])
+        XCTAssertEqual(s1.behaviorHints?.cached, true)
+        XCTAssertEqual(s1.behaviorHints?.videoSize, 2147483648)
+        XCTAssertEqual(s1.behaviorHints?.proxyHeaders?.request?["User-Agent"], "Nuvio/1.0")
+        XCTAssertEqual(s1.behaviorHints?.proxyHeaders?.request?["Content-Length"], "1024")
+        XCTAssertEqual(s1.behaviorHints?.storyboard, "https://aiostreams.example/storyboard.vtt")
+
+        let s2 = try XCTUnwrap(streams?.last)
+        XCTAssertEqual(s2.fileIdx, 2)
+        XCTAssertEqual(s2.behaviorHints?.isCached, true)
+        XCTAssertEqual(s2.behaviorHints?.videoSize, 5368709120)
+        XCTAssertEqual(s2.behaviorHints?.storyboard, "https://aiostreams.example/storyboard2.vtt")
+
+        let nuvio1 = s1.toNuvioStream(addonName: "AIOStreams")
+        XCTAssertNotNil(nuvio1)
+        XCTAssertEqual(nuvio1?.isCached, true)
+        XCTAssertEqual(nuvio1?.fileIdx, 0)
+        XCTAssertEqual(nuvio1?.trickplayURL?.absoluteString, "https://aiostreams.example/storyboard.vtt")
+    }
+
+    func testLossyStreamListDropsCorruptStreamWithoutFailingArray() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "Valid Stream 1",
+                    "url": "https://aiostreams.example/1.mkv"
+                },
+                "completely-invalid-non-object-stream",
+                {
+                    "name": "Valid Stream 2",
+                    "url": "https://aiostreams.example/2.mkv"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let streams = decoded.streams
+        XCTAssertNotNil(streams)
+        XCTAssertEqual(streams?.count, 2)
+        XCTAssertEqual(streams?.first?.name, "Valid Stream 1")
+        XCTAssertEqual(streams?.last?.name, "Valid Stream 2")
+    }
 }
+
 

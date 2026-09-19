@@ -40,7 +40,8 @@ extension PlayerView {
                     provider: provider,
                     filename: filename,
                     videoSize: videoSize,
-                    trickplayURL: trickplayURL
+                    trickplayURL: trickplayURL,
+                    currentEpisode: currentEpisode
                 )
                 if subtitle != PlaybackMarkers.trailerSubtitle {
                     viewModel.fetchExternalSubtitles(
@@ -102,6 +103,17 @@ extension PlayerView {
                 }
                 didHandleFinished = true
                 onFinished()
+            }
+            .onChange(of: viewModel.hasRenderedFirstFrame) { _, ready in
+                if ready,
+                   !viewModel.isSwitchingSource,
+                   !viewModel.isReloadingStream,
+                   !viewModel.didDetectReplacementStream,
+                   !didReportPlaybackStarted {
+                    didReportPlaybackStarted = true
+                    PlaybackStartupTiming.complete()
+                    onPlaybackStarted?()
+                }
             }
             .onChange(of: viewModel.isSwitchingSource) { _, isSwitching in
                 syncPlaybackWakeLock()
@@ -227,7 +239,8 @@ extension PlayerView {
             .onChange(of: viewModel.isAutoPlayCancelled) { _, cancelled in
                 if cancelled {
                     cancelAutoPlayFocused = false
-                    focusNextEpisode()
+                    nextEpisodeFocused = false
+                    focusRemoteInput()
                 }
             }
             .onChange(of: viewModel.showSkipSegmentCard) { _, visible in

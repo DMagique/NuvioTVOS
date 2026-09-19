@@ -542,7 +542,13 @@ struct CollectionFolderBrowseView: View {
             with: WatchedStore.catalogTitleIdentityKeys(for: meta)
         )
         guard !["series", "tv", "show", "tvshow"].contains(meta.type.lowercased()) else {
-            return titleWatched ? true : nil
+            if titleWatched {
+                return true
+            }
+            if !WatchedStore.hasWatchedAnyEpisodes(for: meta) {
+                return false
+            }
+            return nil
         }
         return titleWatched
     }
@@ -947,7 +953,13 @@ private struct CollectionFolderHomeStyleRow: View {
             with: WatchedStore.catalogTitleIdentityKeys(for: meta)
         )
         guard !["series", "tv", "show", "tvshow"].contains(meta.type.lowercased()) else {
-            return titleWatched ? true : nil
+            if titleWatched {
+                return true
+            }
+            if !WatchedStore.hasWatchedAnyEpisodes(for: meta) {
+                return false
+            }
+            return nil
         }
         return titleWatched
     }

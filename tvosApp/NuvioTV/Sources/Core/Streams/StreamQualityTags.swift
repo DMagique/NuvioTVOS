@@ -361,13 +361,25 @@ struct StreamQualityTags: Equatable, Codable {
 /// Keys live in the active profile's `UserDefaults` suite via `ProfileSettings`.
 enum LastStreamQualityStore {
     private static let prefix = "nuvio.tv.lastStreamQuality."
+    private static let storageDirectoryName = "lastStreamQuality"
+    private static let maxEntries = 200
+    private static let lock = NSLock()
 
     static func save(metaId: String, tags: StreamQualityTags, profileId: String? = nil) {
         // Never persist low-resolution (< 720p), unknown, or ticket streams as the title's preferred quality
         guard tags.resolution >= 720 else { return }
-        let key = prefix + metaId
-        guard let data = try? JSONEncoder().encode(tags) else { return }
-        defaults(for: profileId).set(data, forKey: key)
+        let trimmedId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else { return }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        records[trimmedId] = tags
+        persistRecords(records, profileId: profileId)
+
+        // Clear legacy UserDefaults key if present
+        defaults(for: profileId).removeObject(forKey: prefix + trimmedId)
     }
 
     static func save(metaId: String, stream: NuvioStream, profileId: String? = nil) {
@@ -399,27 +411,39 @@ enum LastStreamQualityStore {
     }
 
     static func load(metaId: String, profileId: String? = nil) -> StreamQualityTags? {
-        let key = prefix + metaId
-        let store = defaults(for: profileId)
+        let trimmedId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedId.isEmpty else { return nil }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        let records = loadRecords(profileId: profileId)
         let loadedTags: StreamQualityTags? = {
+            if let tags = records[trimmedId] {
+                return tags.resolution >= 720 ? tags : nil
+            }
+            let key = prefix + trimmedId
+            let store = defaults(for: profileId)
             guard let data = store.data(forKey: key) else { return nil }
             guard let tags = try? JSONDecoder().decode(StreamQualityTags.self, from: data) else { return nil }
-            // Self-heal: purge corrupt/sub-720p/ticket tags from UserDefaults so a title never gets stuck on N/A
-            if tags.resolution < 720 {
-                store.removeObject(forKey: key)
-                return nil
+            store.removeObject(forKey: key)
+            if tags.resolution >= 720 {
+                var updated = records
+                updated[trimmedId] = tags
+                persistRecords(updated, profileId: profileId)
+                return tags
             }
-            return tags
+            return nil
         }()
 
         if var tags = loadedTags {
-            if let binge = BingeGroupStore.load(seriesId: metaId, profileId: profileId) {
+            if let binge = BingeGroupStore.load(seriesId: trimmedId, profileId: profileId) {
                 if tags.bingeGroup == nil { tags.bingeGroup = binge.bingeGroup }
                 if tags.addonName == nil { tags.addonName = binge.addonName }
                 if tags.releaseFingerprint == nil { tags.releaseFingerprint = binge.releaseFingerprint }
             }
             return tags
-        } else if let binge = BingeGroupStore.load(seriesId: metaId, profileId: profileId),
+        } else if let binge = BingeGroupStore.load(seriesId: trimmedId, profileId: profileId),
                   binge.resolution >= 720,
                   binge.bingeGroup != nil || binge.releaseFingerprint != nil {
             return StreamQualityTags(
@@ -432,6 +456,47 @@ enum LastStreamQualityStore {
             )
         }
         return nil
+    }
+
+    private static func storageKey(for profileId: String?) -> String {
+        let id = profileId ?? ProfileSettings.activeProfileID ?? "default"
+        return "lastStreamQuality.\(id)"
+    }
+
+    private static func loadRecords(profileId: String?) -> [String: StreamQualityTags] {
+        let key = storageKey(for: profileId)
+        if let data = LargePayloadStore.read(key: key, directory: storageDirectoryName),
+           let decoded = try? JSONDecoder().decode([String: StreamQualityTags].self, from: data) {
+            return decoded
+        }
+
+        // Migrate any legacy records from UserDefaults
+        let store = defaults(for: profileId)
+        var migrated: [String: StreamQualityTags] = [:]
+        for (k, _) in store.dictionaryRepresentation() where k.hasPrefix(prefix) {
+            let metaId = String(k.dropFirst(prefix.count))
+            if let data = store.data(forKey: k),
+               let tags = try? JSONDecoder().decode(StreamQualityTags.self, from: data),
+               tags.resolution >= 720 {
+                migrated[metaId] = tags
+            }
+            store.removeObject(forKey: k)
+        }
+        if !migrated.isEmpty {
+            persistRecords(migrated, profileId: profileId)
+        }
+        return migrated
+    }
+
+    private static func persistRecords(_ records: [String: StreamQualityTags], profileId: String?) {
+        let key = storageKey(for: profileId)
+        if records.isEmpty {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
+            return
+        }
+        let bounded = Dictionary(uniqueKeysWithValues: records.prefix(maxEntries).map { ($0.key, $0.value) })
+        guard let data = try? JSONEncoder().encode(bounded) else { return }
+        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
@@ -447,14 +512,30 @@ enum LastStreamQualityStore {
 /// so this stays separate from their authoritative resume position.
 enum LastPlaybackStreamStore {
     private static let prefix = "nuvio.tv.lastPlaybackStream."
+    private static let storageDirectoryName = "lastPlaybackStream"
+    private static let maxEntries = 100
+    private static let lock = NSLock()
+    /// Maximum time-to-live (2 hours) for cached remote/debrid stream URLs.
+    /// Local files (SMB, localhost, private LAN) do not expire based on this TTL.
+    public static let remoteStreamTTL: TimeInterval = 7200
 
     private struct Record: Codable {
         let url: String
-        /// Optional for compatibility with records saved before stream headers
-        /// were persisted.
         let httpHeaders: [String: String]?
         let season: Int?
         let episode: Int?
+        let savedAt: Date?
+    }
+
+    private static func isRemoteExpiringURL(_ urlString: String) -> Bool {
+        guard let url = URL(string: urlString) else { return false }
+        if url.scheme?.lowercased() == "smb" { return false }
+        guard let host = url.host?.lowercased() else { return false }
+        if host == "127.0.0.1" || host == "localhost" { return false }
+        if host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("172.16.") || host.hasPrefix("172.17.") || host.hasPrefix("172.18.") || host.hasPrefix("172.19.") || host.hasPrefix("172.2") || host.hasPrefix("172.30.") || host.hasPrefix("172.31.") {
+            return false
+        }
+        return true
     }
 
     static func save(
@@ -463,34 +544,88 @@ enum LastPlaybackStreamStore {
         httpHeaders: [String: String] = [:],
         season: Int?,
         episode: Int?,
-        profileId: String? = nil
+        profileId: String? = nil,
+        savedAt: Date = Date()
     ) {
-        let url = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !metaId.isEmpty, !url.isEmpty, URL(string: url) != nil,
-              let data = try? JSONEncoder().encode(
-                Record(
-                    url: url,
-                    httpHeaders: httpHeaders.isEmpty ? nil : httpHeaders,
-                    season: season,
-                    episode: episode
-                )
-              ) else { return }
-        defaults(for: profileId).set(data, forKey: prefix + metaId)
+        let cleanUrl = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMetaId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMetaId.isEmpty, !cleanUrl.isEmpty, URL(string: cleanUrl) != nil else { return }
+
+        let record = Record(
+            url: cleanUrl,
+            httpHeaders: httpHeaders.isEmpty ? nil : httpHeaders,
+            season: season,
+            episode: episode,
+            savedAt: savedAt
+        )
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        records[trimmedMetaId] = record
+        persistRecords(records, profileId: profileId)
+
+        let store = defaults(for: profileId)
+        store.removeObject(forKey: prefix + trimmedMetaId)
     }
 
     static func load(
         metaId: String,
         season: Int?,
         episode: Int?,
-        profileId: String? = nil
+        profileId: String? = nil,
+        now: Date = Date()
     ) -> (url: String, httpHeaders: [String: String])? {
-        guard let data = defaults(for: profileId).data(forKey: prefix + metaId),
-              let record = try? JSONDecoder().decode(Record.self, from: data),
-              record.season == season,
-              record.episode == episode else {
-            return nil
+        let trimmedMetaId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMetaId.isEmpty else { return nil }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        if let record = records[trimmedMetaId],
+           record.season == season,
+           record.episode == episode {
+            if isRemoteExpiringURL(record.url) {
+                if let savedAt = record.savedAt {
+                    if now.timeIntervalSince(savedAt) > remoteStreamTTL {
+                        records.removeValue(forKey: trimmedMetaId)
+                        persistRecords(records, profileId: profileId)
+                        return nil
+                    }
+                } else {
+                    records.removeValue(forKey: trimmedMetaId)
+                    persistRecords(records, profileId: profileId)
+                    return nil
+                }
+            }
+            return (record.url, record.httpHeaders ?? [:])
         }
-        return (record.url, record.httpHeaders ?? [:])
+
+        // Legacy fallback from UserDefaults
+        let store = defaults(for: profileId)
+        let key = prefix + trimmedMetaId
+        if let data = store.data(forKey: key),
+           let record = try? JSONDecoder().decode(Record.self, from: data) {
+            store.removeObject(forKey: key)
+            if record.season == season, record.episode == episode {
+                if isRemoteExpiringURL(record.url) {
+                    if let savedAt = record.savedAt, now.timeIntervalSince(savedAt) <= remoteStreamTTL {
+                        var updated = records
+                        updated[trimmedMetaId] = record
+                        persistRecords(updated, profileId: profileId)
+                        return (record.url, record.httpHeaders ?? [:])
+                    }
+                    return nil
+                }
+                var updated = records
+                updated[trimmedMetaId] = record
+                persistRecords(updated, profileId: profileId)
+                return (record.url, record.httpHeaders ?? [:])
+            }
+        }
+        return nil
     }
 
     static func remove(
@@ -501,6 +636,17 @@ enum LastPlaybackStreamStore {
     ) {
         let trimmedMetaId = metaId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedMetaId.isEmpty else { return }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        if let existing = records[trimmedMetaId] {
+            if (season == nil || existing.season == season) && (episode == nil || existing.episode == episode) {
+                records.removeValue(forKey: trimmedMetaId)
+                persistRecords(records, profileId: profileId)
+            }
+        }
         let store = defaults(for: profileId)
         let key = prefix + trimmedMetaId
         if season == nil && episode == nil {
@@ -513,6 +659,45 @@ enum LastPlaybackStreamStore {
                 store.removeObject(forKey: key)
             }
         }
+    }
+
+    private static func storageKey(for profileId: String?) -> String {
+        let id = profileId ?? ProfileSettings.activeProfileID ?? "default"
+        return "lastPlaybackStream.\(id)"
+    }
+
+    private static func loadRecords(profileId: String?) -> [String: Record] {
+        let key = storageKey(for: profileId)
+        if let data = LargePayloadStore.read(key: key, directory: storageDirectoryName),
+           let decoded = try? JSONDecoder().decode([String: Record].self, from: data) {
+            return decoded
+        }
+
+        let store = defaults(for: profileId)
+        var migrated: [String: Record] = [:]
+        for (k, _) in store.dictionaryRepresentation() where k.hasPrefix(prefix) {
+            let metaId = String(k.dropFirst(prefix.count))
+            if let data = store.data(forKey: k),
+               let record = try? JSONDecoder().decode(Record.self, from: data) {
+                migrated[metaId] = record
+            }
+            store.removeObject(forKey: k)
+        }
+        if !migrated.isEmpty {
+            persistRecords(migrated, profileId: profileId)
+        }
+        return migrated
+    }
+
+    private static func persistRecords(_ records: [String: Record], profileId: String?) {
+        let key = storageKey(for: profileId)
+        if records.isEmpty {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
+            return
+        }
+        let bounded = Dictionary(uniqueKeysWithValues: records.prefix(maxEntries).map { ($0.key, $0.value) })
+        guard let data = try? JSONEncoder().encode(bounded) else { return }
+        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
@@ -873,21 +1058,44 @@ enum StreamBadgeSettingsStore {
     static let changedNotification = Notification.Name("NuvioStreamBadgeSettingsChanged")
     static let goldBadgePackURL = "https://raw.githubusercontent.com/djgenesis/badges/refs/heads/main/gold_badges_complete.json"
 
+    private static let storageDirectoryName = "StreamBadges"
     private static var cachedSnapshot: StreamBadgeSettingsSnapshot?
     private static var cachedProfileScope: String?
     private static var cachedRulesValue: String?
 
+    private static func storageKey(for profileScope: String) -> String {
+        "rules.\(profileScope)"
+    }
+
+    private static func readRulesData(for profileScope: String) -> Data? {
+        if let data = LargePayloadStore.read(key: storageKey(for: profileScope), directory: storageDirectoryName) {
+            return data
+        }
+        // Legacy migration: read from UserDefaults once, move to file storage, and purge preferences key
+        let defaults = ProfileSettings.store(for: profileScope)
+        if let legacyString = defaults.string(forKey: SettingsKey.streamBadgeRules),
+           let data = legacyString.data(using: .utf8) {
+            if LargePayloadStore.write(data, key: storageKey(for: profileScope), directory: storageDirectoryName) {
+                defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
+            }
+            return data
+        }
+        return nil
+    }
+
     static var snapshot: StreamBadgeSettingsSnapshot {
         let profileScope = ProfileSettings.activeProfileScope
         let defaults = ProfileSettings.current
-        let storedRules = defaults.string(forKey: SettingsKey.streamBadgeRules)
+        let storedData = readRulesData(for: profileScope)
         let storedPlacement = defaults.string(forKey: SettingsKey.streamBadgePlacement)
         let storedFileSize = defaults.object(forKey: SettingsKey.showFileSizeBadges) as? Bool ?? true
         let storedAddonLogo = defaults.object(forKey: SettingsKey.showAddonLogo) as? Bool ?? false
         let placement = StreamBadgePlacement(rawValue: storedPlacement ?? StreamBadgePlacement.bottom.rawValue) ?? .bottom
 
+        let storedRulesValue = storedData != nil ? String(data: storedData!, encoding: .utf8) : nil
+
         if cachedProfileScope == profileScope,
-           cachedRulesValue == storedRules,
+           cachedRulesValue == storedRulesValue,
            let cachedSnapshot,
            cachedSnapshot.showFileSizeBadges == storedFileSize,
            cachedSnapshot.showAddonLogo == storedAddonLogo,
@@ -896,8 +1104,8 @@ enum StreamBadgeSettingsStore {
         }
 
         let rules: StreamBadgeRules
-        if let data = storedRules?.data(using: .utf8),
-           let decoded = try? JSONDecoder().decode(StreamBadgeRules.self, from: data) {
+        if let storedData,
+           let decoded = try? JSONDecoder().decode(StreamBadgeRules.self, from: storedData) {
             rules = decoded.normalized()
         } else {
             rules = StreamBadgeRules()
@@ -909,18 +1117,49 @@ enum StreamBadgeSettingsStore {
             badgePlacement: placement
         )
         cachedProfileScope = profileScope
-        cachedRulesValue = storedRules
+        cachedRulesValue = storedRulesValue
         cachedSnapshot = snapshot
         return snapshot
     }
 
-    static func saveRules(_ rules: StreamBadgeRules) {
-        let rules = rules.normalized()
-        let defaults = ProfileSettings.current
-        if rules.imports.isEmpty {
+    static func rawRulesJSON(for profileScope: String = ProfileSettings.activeProfileScope) -> String? {
+        guard let data = readRulesData(for: profileScope) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func saveRawRulesJSON(_ raw: String?, for profileScope: String = ProfileSettings.activeProfileScope) {
+        let defaults = ProfileSettings.store(for: profileScope)
+        guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let data = raw.data(using: .utf8) else {
+            LargePayloadStore.remove(key: storageKey(for: profileScope), directory: storageDirectoryName)
             defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
-        } else if let data = try? JSONEncoder().encode(rules), let value = String(data: data, encoding: .utf8) {
-            defaults.set(value, forKey: SettingsKey.streamBadgeRules)
+            postChanged()
+            return
+        }
+        if let decoded = try? JSONDecoder().decode(StreamBadgeRules.self, from: data) {
+            saveRules(decoded, for: profileScope)
+        } else {
+            LargePayloadStore.write(data, key: storageKey(for: profileScope), directory: storageDirectoryName)
+            defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
+            postChanged()
+        }
+    }
+
+    static func removeRules(for profileScope: String) {
+        LargePayloadStore.remove(key: storageKey(for: profileScope), directory: storageDirectoryName)
+        ProfileSettings.store(for: profileScope).removeObject(forKey: SettingsKey.streamBadgeRules)
+        postChanged()
+    }
+
+    static func saveRules(_ rules: StreamBadgeRules, for profileScope: String = ProfileSettings.activeProfileScope) {
+        let rules = rules.normalized()
+        let defaults = ProfileSettings.store(for: profileScope)
+        if rules.imports.isEmpty {
+            LargePayloadStore.remove(key: storageKey(for: profileScope), directory: storageDirectoryName)
+            defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
+        } else if let data = try? JSONEncoder().encode(rules) {
+            LargePayloadStore.write(data, key: storageKey(for: profileScope), directory: storageDirectoryName)
+            defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
         }
         postChanged()
     }

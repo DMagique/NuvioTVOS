@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - Network buffer sizing
 
@@ -7,12 +8,11 @@ import Foundation
 /// keeps already-played data resident for instant backward seeks. Values are
 /// libmpv bytesize strings (e.g. `"128MiB"`).
 ///
-/// Caps are intentionally modest on tvOS. Apple TV often has only 2–4 GB RAM
-/// total; demuxer cache + decode surfaces + Metal/Vulkan can jetsam the app
-/// (bug type 298 / `per-process-limit`) once a process approaches ~2 GB.
-/// Older defaults (Auto ≈ 512 MiB–1 GiB forward alone) filled aggressively on
-/// debrid/4K hosts and caused frequent foreground kills during long watches.
-struct PlaybackCacheSettings {
+/// Dynamic scaling in Auto balances ample readahead runway for high-bitrate 4K
+/// (512 MiB forward on high-headroom 4 GB devices like Apple TV 4K Gen 3)
+/// against tvOS jetsam memory pressure limits, throttling down on lower-RAM/constrained
+/// devices or under memory pressure.
+struct PlaybackCacheSettings: Equatable {
     let forwardBuffer: String
     let backBuffer: String
 
@@ -24,25 +24,41 @@ struct PlaybackCacheSettings {
         case "Medium":
             return PlaybackCacheSettings(forwardBuffer: "128MiB", backBuffer: "32MiB")
         case "Large":
-            // Still well under previous 1 GiB default; enough for bursty hosts.
-            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+            return PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
         case "Max":
-            // High-RAM Apple TV only. Still capped to limit jetsam risk.
-            return PlaybackCacheSettings(forwardBuffer: "512MiB", backBuffer: "96MiB")
+            // High-RAM Apple TV (256 MiB forward / 64 MiB back).
+            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        case "Ultra", "Extreme":
+            // Safe ceiling for Apple TV 4K Gen 3. Leaves ample headroom for 4K VideoToolbox decode.
+            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
         default:
             return auto
         }
     }
 
-    /// Ceiling scaled to total device RAM (`physicalMemory` is bytes).
-    /// Prefer staying far below jetsam: demuxer is only one slice of peak RSS.
-    /// > 3.5 GB (newer 4K) → 256/64, ~3 GB (common 4K) → 192/48, ≤ 2.5 GB (HD) → 64/16.
-    private static var auto: PlaybackCacheSettings {
-        let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
-        if gib > 3.5 {
+    /// Dynamically scales buffer size based on live available memory headroom and physical RAM.
+    /// Safely sized on tvOS to ensure VideoToolbox 4K decoding (videocodecd ~1.5 GB) never triggers jetsam kills.
+    /// - High Headroom (>=1000 MB available on 4GB hardware) -> 256/64
+    /// - Moderate Headroom (>=450 MB available on 3GB hardware) -> 192/48
+    /// - Constrained Memory (>=250 MB available) -> 128/32
+    /// - Low Memory (<250 MB or <=2.5 GB HD) -> 64/16
+    static var auto: PlaybackCacheSettings {
+        resolveAuto(
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory,
+            availableMemoryBytes: os_proc_available_memory()
+        )
+    }
+
+    static func resolveAuto(physicalMemoryBytes: UInt64, availableMemoryBytes: size_t) -> PlaybackCacheSettings {
+        let gibPhysical = Double(physicalMemoryBytes) / 1_073_741_824.0
+        let mbAvailable = Double(availableMemoryBytes) / (1024.0 * 1024.0)
+
+        if gibPhysical > 3.5 && mbAvailable >= 1000 {
             return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
-        } else if gib > 2.5 {
+        } else if gibPhysical > 2.5 && mbAvailable >= 450 {
             return PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        } else if mbAvailable >= 250 {
+            return PlaybackCacheSettings(forwardBuffer: "128MiB", backBuffer: "32MiB")
         } else {
             return PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
         }

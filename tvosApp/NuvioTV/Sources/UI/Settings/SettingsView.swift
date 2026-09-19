@@ -277,6 +277,8 @@ enum SettingsKey {
     static let subtitleSize = "nuvio.tv.settings.playback.subtitleSize"
     static let frameRateMatching = "nuvio.tv.settings.playback.frameRateMatching"
     static let networkCache = "nuvio.tv.settings.playback.networkCache"
+    static let hybridDiskCacheEnabled = "nuvio.tv.settings.playback.hybridDiskCacheEnabled"
+    static let hybridDiskCacheLimitGB = "nuvio.tv.settings.playback.hybridDiskCacheLimitGB"
     static let playbackTrackSelections = "nuvio.tv.settings.playback.trackSelections"
     static let externalPlayerForwardSubtitles = "nuvio.tv.settings.playback.externalPlayerForwardSubtitles"
     static let assOverrideMode = "nuvio.tv.settings.playback.assOverrideMode"
@@ -299,14 +301,14 @@ enum SettingsKey {
     /// and never enter the account settings payload.
     static let deviceLocal = Set([
         traktConnected, traktClientID, traktClientSecret, simklClientID, aiSubtitlesGeminiAPIKey,
-        p2pConsentAccepted
+        p2pConsentAccepted, iCloudSyncEnabled, iCloudLastSyncDate
     ])
 
     static let all = [
         profileName, profilePinEnabled, profileAutoSelectLast, profileRequireSelectionAfterBackground,
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
-        homeLayout, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, discoverLocation,
+        homeLayout, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, discoverLocation,
         searchStyle,
         continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
@@ -331,15 +333,19 @@ enum SettingsKey {
         aiSubtitlesTargetLanguage, aiSubtitlesAutoSelect, aiSubtitlesStripHearingImpaired,
         streamAddonManifestURL, streamAddonManifestURLs,
         streamAddonManifestStates,
-        playerEngine, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        cinemetaDisabled, deletedLocalAddons,
+        smbServers, smbLibraryIndex, smbLocalRowEnabled,
+        jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
+        playerEngine, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         cachedOnlyStreams, preferHardwareDecodedStreams, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
         autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
-        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, playbackTrackSelections,
+        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections,
         externalPlayerForwardSubtitles, assOverrideMode,
         playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, seekPreviewEnabled,
-        fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter
+        fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter,
+        iCloudSyncEnabled, iCloudLastSyncDate
     ] + SubtitleStyleKey.all
 }
 
@@ -1477,9 +1483,9 @@ private struct SettingsCategoryPillBackground: ViewModifier {
         if isFocused {
             content.background(Color.white, in: Capsule())
         } else if isSelected {
-            content.settingsGlass(shape: Capsule(), isProminent: true)
+            content.background(Color.white.opacity(0.14), in: Capsule())
         } else {
-            content.settingsGlass(shape: Capsule(), isProminent: false)
+            content.background(Color.white.opacity(0.06), in: Capsule())
         }
     }
 }
@@ -1499,11 +1505,12 @@ private struct AccountSettingsView: View {
     let onPresentPin: (ProfilePinSheetMode) -> Void
 
     @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
-    @AppStorage(SettingsKey.profileAutoSelectLast) private var autoSelectLastProfile = true
-    @AppStorage(SettingsKey.profileRequireSelectionAfterBackground)
+    @AppStorage(SettingsKey.profileAutoSelectLast, store: .standard) private var autoSelectLastProfile = true
+    @AppStorage(SettingsKey.profileRequireSelectionAfterBackground, store: .standard)
     private var requireProfileSelectionAfterBackground = false
     @AppStorage(SettingsKey.accountSyncWatchState) private var syncWatchState = true
-    @AppStorage(SettingsKey.iCloudSyncEnabled) private var iCloudSyncEnabled = false
+    @AppStorage(SettingsKey.iCloudSyncEnabled, store: .standard) private var iCloudSyncEnabled = false
+    @ObservedObject private var iCloudSyncManager = ICloudSettingsSyncManager.shared
     @State private var editableProfileName = ""
     @State private var showingAvatarPicker = false
 
@@ -1629,8 +1636,6 @@ private struct AccountSettingsView: View {
                     isOn: $requireProfileSelectionAfterBackground,
                     accentColor: accentColor
                 )
-                .opacity(!autoSelectLastProfile ? 1 : 0.46)
-                .disabled(autoSelectLastProfile)
             }
 
             SettingsGroup(
@@ -1680,6 +1685,28 @@ private struct AccountSettingsView: View {
                     isOn: $iCloudSyncEnabled,
                     accentColor: accentColor
                 )
+
+                if iCloudSyncEnabled {
+                    SettingsActionRow(
+                        title: L10n.string("tvos_settings_icloud_sync_now", fallback: "Sync Now"),
+                        subtitle: L10n.string(
+                            "tvos_settings_icloud_sync_now_subtitle",
+                            fallback: "Push and pull the latest settings to and from iCloud"
+                        ),
+                        value: L10n.string("action_sync", fallback: "Sync"),
+                        accentColor: accentColor,
+                        action: {
+                            ICloudSettingsSyncManager.shared.syncNow()
+                        }
+                    )
+
+                    if let lastSync = iCloudSyncManager.lastSyncDate {
+                        SettingsInfoRow(
+                            title: L10n.string("tvos_settings_icloud_last_sync", fallback: "Last iCloud Sync"),
+                            value: DateFormatter.localizedString(from: lastSync, dateStyle: .short, timeStyle: .medium)
+                        )
+                    }
+                }
 
                 if isAuthenticated {
                     if sessionNeedsReauthentication {
@@ -1742,6 +1769,9 @@ private struct AccountSettingsView: View {
                     onChangeProfileAvatar?(profile.id, avatarId)
                 }
             }
+        }
+        .onChange(of: iCloudSyncEnabled) { _, newValue in
+            ICloudSettingsSyncManager.shared.isEnabled = newValue
         }
     }
 
@@ -2149,7 +2179,9 @@ private struct AppearanceSettingsView: View {
             if languageTag != resolved.tag {
                 languageTag = resolved.tag
             }
-            localeManager.applyStoredTag(languageTag)
+            if languageTag != localeManager.language.tag {
+                localeManager.applyStoredTag(languageTag)
+            }
         }
         .onChange(of: languageTag) { _, newValue in
             localeManager.applyStoredTag(newValue)
@@ -2238,12 +2270,18 @@ private struct CardStyleLivePreview: View {
                     }
                     .frame(width: 140, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: portraitRadius, style: .continuous))
-                    .modifier(
-                        LiquidGlassCardModifier(
-                            cornerRadius: portraitRadius,
-                            isFocused: true,
-                            isEnabled: isLiquidGlass
-                        )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
+                            .strokeBorder(
+                                isLiquidGlass
+                                    ? LinearGradient(
+                                        colors: [Color.white.opacity(0.55), Color.white.opacity(0.20), Color.white.opacity(0.35)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                    : LinearGradient(colors: [Color.clear], startPoint: .top, endPoint: .bottom),
+                                lineWidth: 1.5
+                            )
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
@@ -2286,7 +2324,7 @@ private struct CardStyleLivePreview: View {
                                         if isLiquidGlass {
                                             Capsule()
                                                 .fill(Color.white.opacity(0.18))
-                                                .modifier(LiquidGlassBadgeModifier(cornerRadius: 12))
+                                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.30), lineWidth: 1))
                                         } else {
                                             Capsule().fill(Color.black.opacity(0.60))
                                         }
@@ -2329,12 +2367,18 @@ private struct CardStyleLivePreview: View {
                     }
                     .frame(width: 340, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous))
-                    .modifier(
-                        LiquidGlassCardModifier(
-                            cornerRadius: landscapeRadius,
-                            isFocused: true,
-                            isEnabled: isLiquidGlass
-                        )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous)
+                            .strokeBorder(
+                                isLiquidGlass
+                                    ? LinearGradient(
+                                        colors: [Color.white.opacity(0.55), Color.white.opacity(0.20), Color.white.opacity(0.35)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                    : LinearGradient(colors: [Color.clear], startPoint: .top, endPoint: .bottom),
+                                lineWidth: 1.5
+                            )
                     )
                 }
             }
@@ -2874,6 +2918,8 @@ private struct LayoutDiscoverySettingsView: View {
                     isOn: $fullscreenHeroBackdrop,
                     accentColor: accentColor
                 )
+                .opacity(heroEnabled ? 1 : 0.46)
+                .disabled(!heroEnabled)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_layout_poster_labels", fallback: "Poster Labels"),
@@ -3385,7 +3431,11 @@ private struct IntegrationSettingsView: View {
                     title: L10n.string("tvos_settings_simkl_client_id_title", fallback: "Simkl Client ID"),
                     subtitle: L10n.string("tvos_settings_simkl_client_id_subtitle", fallback: "Create an API app at simkl.com/settings/developer — stored only on this Apple TV"),
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
-                    text: $simklClientIDDraft
+                    text: $simklClientIDDraft,
+                    onCommit: {
+                        simklClientID = simklClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        simklViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsInfoRow(title: L10n.string("tvos_settings_simkl_redirect_uri", fallback: "Simkl Redirect URI"), value: SimklConfig.redirectURI)
@@ -3410,7 +3460,11 @@ private struct IntegrationSettingsView: View {
                     title: "Trakt Client ID",
                     subtitle: "Create an API app at trakt.tv/oauth/applications",
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
-                    text: $traktClientIDDraft
+                    text: $traktClientIDDraft,
+                    onCommit: {
+                        traktClientID = traktClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        traktViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsTextFieldRow(
@@ -3421,7 +3475,11 @@ private struct IntegrationSettingsView: View {
                     ),
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
                     text: $traktClientSecretDraft,
-                    isSecure: true
+                    isSecure: true,
+                    onCommit: {
+                        traktClientSecret = traktClientSecretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        traktViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsInfoRow(title: "Trakt Redirect URI", value: TraktConfig.redirectURI)
@@ -3436,10 +3494,10 @@ private struct IntegrationSettingsView: View {
             }
 
             SettingsGroup(
-                title: L10n.string("settings_mdblist_title", fallback: "MDBList"),
+                title: L10n.string("settings_mdblist_title", fallback: "MDBList (Watch Progress & Scrobble)"),
                 subtitle: L10n.string(
                     "tvos_settings_mdblist_tracking_subtitle",
-                    fallback: "Sync playback, watched history, and Continue Watching with MDBList"
+                    fallback: "Sync playback, watched history, and Continue Watching with your MDBList account"
                 )
             ) {
                 MdbListConnectionSettingsCard(
@@ -3500,8 +3558,8 @@ private struct IntegrationSettingsView: View {
                 }
 
                 SettingsActionRow(
-                    title: L10n.string("settings_mdblist_ratings_title", fallback: "MDBList Ratings"),
-                    subtitle: L10n.string("tvos_settings_mdblist_integration_subtitle", fallback: "Get a free API key at mdblist.com/preferences"),
+                    title: L10n.string("settings_mdblist_ratings_title", fallback: "MDBList Ratings & Badges (API Key)"),
+                    subtitle: L10n.string("tvos_settings_mdblist_integration_subtitle", fallback: "Get a free API key at mdblist.com/preferences for ratings and artwork badges"),
                     value: mdbListEnabled && mdbListHasApiKey ? L10n.string("tvos_common_on", fallback: "On") : L10n.string("settings_open", fallback: "Open"),
                     accentColor: accentColor
                 ) {
@@ -3741,6 +3799,27 @@ private struct IntegrationSettingsView: View {
                 if !premiumizeAccessToken.isEmpty { debridApiKey = premiumizeAccessToken }
             default:
                 break
+            }
+        }
+        .onChange(of: traktClientIDDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if traktClientID != trimmed {
+                traktClientID = trimmed
+                traktViewModel.credentialsDidChange()
+            }
+        }
+        .onChange(of: traktClientSecretDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if traktClientSecret != trimmed {
+                traktClientSecret = trimmed
+                traktViewModel.credentialsDidChange()
+            }
+        }
+        .onChange(of: simklClientIDDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if simklClientID != trimmed {
+                simklClientID = trimmed
+                simklViewModel.credentialsDidChange()
             }
         }
     }
@@ -6516,6 +6595,8 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.forcedSubtitles) private var forcedSubtitles = true
     @AppStorage(SettingsKey.frameRateMatching) private var frameRateMatching = "Always"
     @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
+    @AppStorage(SettingsKey.hybridDiskCacheEnabled) private var hybridDiskCacheEnabled = true
+    @AppStorage(SettingsKey.hybridDiskCacheLimitGB) private var hybridDiskCacheLimitGB = 20
     @AppStorage(SettingsKey.assOverrideMode) private var assOverrideMode = "Strip"
     @AppStorage(SettingsKey.playerShowPiP) private var playerShowPiP = true
     @AppStorage(SettingsKey.playerShowEpisodes) private var playerShowEpisodes = true
@@ -6533,7 +6614,7 @@ private struct PlaybackSettingsView: View {
     private let frameRateModes = ["Off", "On start/stop", "Always"]
     /// Buffer profiles: Auto scales to RAM; Conservative/Large match product names;
     /// legacy Small/Medium/Large keys still work via PlaybackCacheSettings.
-    private let cacheModes = ["Auto", "Conservative", "Medium", "Large", "Max"]
+    private let cacheModes = ["Auto", "Conservative", "Medium", "Large", "Max", "Ultra"]
     private let assModes = ["Strip", "Scale", "Force"]
     private let streamSortModes = StreamSortOption.allCases.map(\.rawValue)
 
@@ -6589,19 +6670,15 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_prefer_binge_group", fallback: "Prefer Same Source / Binge Group"),
                     subtitle: L10n.string(
                         "tvos_settings_prefer_binge_group_subtitle",
-                        fallback: "Keep using streams from the same release group, add-on, and resolution across next episodes and continue watching."
+                        fallback: "Automatically match and play streams from the same release group, add-on, and resolution across consecutive episodes and continue watching."
                     ),
-                    isOn: $streamAutoPlayPreferBingeGroup,
-                    accentColor: accentColor
-                )
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_reuse_binge_group", fallback: "Reuse Binge Group Source"),
-                    subtitle: L10n.string(
-                        "tvos_settings_reuse_binge_group_subtitle",
-                        fallback: "Automatically match and play the identical stream source across consecutive episodes."
+                    isOn: Binding(
+                        get: { streamAutoPlayPreferBingeGroup || streamAutoPlayReuseBingeGroup },
+                        set: { newValue in
+                            streamAutoPlayPreferBingeGroup = newValue
+                            streamAutoPlayReuseBingeGroup = newValue
+                        }
                     ),
-                    isOn: $streamAutoPlayReuseBingeGroup,
                     accentColor: accentColor
                 )
 
@@ -6634,13 +6711,37 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_buffer_profile", fallback: "Buffer Profile"),
                     subtitle: L10n.string(
                         "tvos_settings_buffer_profile_aether",
-                        fallback: "Disk-backed forward buffer (Aether segments) / MPV demuxer cache. Auto scales to device RAM."
+                        fallback: "Disk-backed forward buffer (Aether segments) / MPV demuxer cache. Auto dynamically scales to memory."
                     ),
                     selection: $networkCache,
                     options: cacheModes,
                     accentColor: accentColor
                 )
 
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_hybrid_disk_cache", fallback: "Hybrid Disk Cache"),
+                    subtitle: L10n.string(
+                        "tvos_settings_hybrid_disk_cache_subtitle",
+                        fallback: "3-tier cache to Apple TV SSD (Demand, 10-min forward fill, whole-file background archive) with instant seek and rewind."
+                    ),
+                    isOn: $hybridDiskCacheEnabled,
+                    accentColor: accentColor
+                )
+
+                if hybridDiskCacheEnabled {
+                    SettingsStepperRow(
+                        title: L10n.string("tvos_settings_hybrid_disk_cache_limit", fallback: "Disk Cache Limit"),
+                        subtitle: L10n.string(
+                            "tvos_settings_hybrid_disk_cache_limit_subtitle",
+                            fallback: "Maximum SSD storage for video prefetching and background title caching."
+                        ),
+                        value: $hybridDiskCacheLimitGB,
+                        range: 5...60,
+                        step: 5,
+                        suffix: " GB",
+                        accentColor: accentColor
+                    )
+                }
             }
 
             SettingsGroup(
@@ -6702,7 +6803,10 @@ private struct PlaybackSettingsView: View {
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_use_top_result", fallback: "Use Top Result"),
-                    subtitle: L10n.string("tvos_settings_use_top_result_subtitle", fallback: "Play the first available source in the list, respecting your stream sort and add-on order"),
+                    subtitle: L10n.string(
+                        "tvos_settings_use_top_result_subtitle",
+                        fallback: "Play the first available source in the list, respecting your stream sort and add-on order (bypasses smart quality scoring)"
+                    ),
                     isOn: $smartStreamUseTopResult,
                     accentColor: accentColor
                 )
@@ -6716,8 +6820,8 @@ private struct PlaybackSettingsView: View {
                     options: streamQualities,
                     accentColor: accentColor
                 )
-                .opacity(smartStreamSelection ? 1 : 0.46)
-                .disabled(!smartStreamSelection)
+                .opacity((smartStreamSelection && !smartStreamUseTopResult) ? 1 : 0.46)
+                .disabled(!smartStreamSelection || smartStreamUseTopResult)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_match_subtitle_language", fallback: "Match Subtitle Language"),
@@ -6725,8 +6829,8 @@ private struct PlaybackSettingsView: View {
                     isOn: $smartSubtitleMatching,
                     accentColor: accentColor
                 )
-                .opacity(smartStreamSelection ? 1 : 0.46)
-                .disabled(!smartStreamSelection)
+                .opacity((smartStreamSelection && !smartStreamUseTopResult) ? 1 : 0.46)
+                .disabled(!smartStreamSelection || smartStreamUseTopResult)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_cached_only", fallback: "Cached Only"),
@@ -6754,10 +6858,10 @@ private struct PlaybackSettingsView: View {
             streamBadgesSettings
 
             SettingsGroup(
-                title: L10n.string("tvos_playback_audio_subtitles", fallback: "Audio & Subtitles"),
+                title: L10n.string("tvos_playback_audio_subtitles", fallback: "Audio & Subtitle Languages"),
                 subtitle: L10n.string(
                     "tvos_playback_audio_subtitles_subtitle",
-                    fallback: "Language and subtitle rendering defaults"
+                    fallback: "Default language preferences for audio and subtitle tracks"
                 )
             ) {
                 SettingsActionRow(
@@ -7649,8 +7753,6 @@ private struct AdvancedSettingsView: View {
     @State private var isClearingCache = false
     @State private var clearedCacheStatus: String?
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.iCloudSyncEnabled) private var iCloudSyncEnabled = false
-    @ObservedObject private var iCloudSyncManager = ICloudSettingsSyncManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -7775,36 +7877,6 @@ private struct AdvancedSettingsView: View {
                     value: testHistoryStatus,
                     isDiagnostic: true
                 )
-            }
-
-            SettingsGroup(
-                title: L10n.string("tvos_settings_icloud_sync_title", fallback: "iCloud Sync"),
-                subtitle: L10n.string(
-                    "tvos_settings_icloud_sync_subtitle",
-                    fallback: "Sync configurations across all Apple TVs on the same iCloud account"
-                )
-            ) {
-                if iCloudSyncEnabled {
-                    SettingsActionRow(
-                        title: L10n.string("tvos_settings_icloud_sync_now", fallback: "Sync Now"),
-                        subtitle: L10n.string(
-                            "tvos_settings_icloud_sync_now_subtitle",
-                            fallback: "Push and pull the latest settings to and from iCloud"
-                        ),
-                        value: L10n.string("action_sync", fallback: "Sync"),
-                        accentColor: accentColor,
-                        action: {
-                            ICloudSettingsSyncManager.shared.syncNow()
-                        }
-                    )
-
-                    if let lastSync = iCloudSyncManager.lastSyncDate {
-                        SettingsInfoRow(
-                            title: L10n.string("tvos_settings_icloud_last_sync", fallback: "Last iCloud Sync"),
-                            value: DateFormatter.localizedString(from: lastSync, dateStyle: .short, timeStyle: .medium)
-                        )
-                    }
-                }
             }
 
             SettingsGroup(
@@ -10092,8 +10164,9 @@ private struct CollectionsSettingsSection: View {
     }
 
     static var collectionsExportURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("nuvio-collections.json")
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return documents.appendingPathComponent("nuvio-collections.json")
     }
 
     private func importCollections(_ imported: [[String: Any]]) {
@@ -10279,6 +10352,7 @@ private struct CollectionTemplatesFlowSheet: View {
         case streamingServices
         case studiosAndFranchises
         case discoverByGenre
+        case asianFilmAndSeries
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -10299,8 +10373,8 @@ private struct CollectionTemplatesFlowSheet: View {
                     Color.black.opacity(0.62)
                         .ignoresSafeArea()
 
-                    VStack(alignment: .leading, spacing: 28) {
-                        VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text("Collection Templates")
                                 .font(.system(size: 38, weight: .bold))
                                 .foregroundColor(.white)
@@ -10331,6 +10405,15 @@ private struct CollectionTemplatesFlowSheet: View {
                             selectedTemplate = .discoverByGenre
                         }
 
+                        CollectionTemplateSummaryCard(
+                            title: "Asian Film & Series",
+                            subtitle: "Korean, Chinese & Japanese dramas, Asian cinema, KissKH & MKV",
+                            systemImage: "globe.asia.australia.fill",
+                            previews: ["KissKH", "MKV Asian", "Asian OTT", "K-Drama", "C-Drama", "Anime & J-Drama", "Asian Cinema"]
+                        ) {
+                            selectedTemplate = .asianFilmAndSeries
+                        }
+
                         HStack {
                             Spacer()
                             CollectionsGlassButton(
@@ -10341,7 +10424,7 @@ private struct CollectionTemplatesFlowSheet: View {
                     }
                     .frame(width: 1040)
                     .padding(.horizontal, 56)
-                    .padding(.vertical, 46)
+                    .padding(.vertical, 40)
                     .loginGlassPanel()
                 }
                 .onExitCommand { dismiss() }
@@ -10360,6 +10443,8 @@ private struct CollectionTemplatesFlowSheet: View {
             return StudiosFranchisesCollectionTemplate.payload()
         case .discoverByGenre:
             return DiscoverGenresCollectionTemplate.payload()
+        case .asianFilmAndSeries:
+            return AsianFilmAndSeriesCollectionTemplate.payload()
         }
     }
 }
@@ -11012,6 +11097,372 @@ private enum DiscoverGenresCollectionTemplate {
     }
 
     private static func source(
+        title: String,
+        mediaType: String,
+        sortBy: String,
+        filters: [String: Any]
+    ) -> [String: Any] {
+        [
+            "provider": "tmdb",
+            "tmdbSourceType": "DISCOVER",
+            "title": title,
+            "mediaType": mediaType,
+            "sortBy": sortBy,
+            "filters": filters
+        ]
+    }
+
+    private static func tmdbBackdropURL(path: String) -> String {
+        "https://image.tmdb.org/t/p/w1280\(path)"
+    }
+}
+
+private enum AsianFilmAndSeriesCollectionTemplate {
+    static func payload() -> [String: Any] {
+        let folders: [[String: Any]] = [
+            kisskhFolder(),
+            mkvFolder(),
+            asianOttFolder(),
+            kdramaFolder(),
+            cdramaFolder(),
+            animeAndJdramaFolder(),
+            asianActionFolder()
+        ]
+
+        return [
+            "templateID": "asian-film-series",
+            "templateVersion": 1,
+            "title": "Asian Film & Series",
+            "pinToTop": false,
+            "focusGlowEnabled": true,
+            "viewMode": "ROWS",
+            "showAllTab": false,
+            "folders": folders
+        ]
+    }
+
+    private static func kisskhFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "KissKH",
+            "coverEmoji": "💋",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/oaGvjB0DvdurWhqAuTLYV3t4b2o.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                [
+                    "provider": "addon",
+                    "addonId": "kisskh",
+                    "type": "series",
+                    "catalogId": "kisskh-drama",
+                    "title": "KissKH • Asian Dramas"
+                ],
+                [
+                    "provider": "addon",
+                    "addonId": "kisskh",
+                    "type": "movie",
+                    "catalogId": "kisskh-movies",
+                    "title": "KissKH • Asian Movies"
+                ],
+                tmdbSource(
+                    title: "K-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko"]
+                ),
+                tmdbSource(
+                    title: "C-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "zh"]
+                ),
+                tmdbSource(
+                    title: "Recent Asian Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: ["withOriginalLanguage": "ko|zh|ja|th"]
+                )
+            ]
+        ]
+    }
+
+    private static func mkvFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "MKV Asian Hub",
+            "coverEmoji": "🎬",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/7IiTTgloJzvGI1TAYymCfbfl3vT.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                [
+                    "provider": "addon",
+                    "addonId": "mkv",
+                    "type": "series",
+                    "catalogId": "mkv-drama",
+                    "title": "MKVDrama • Series"
+                ],
+                [
+                    "provider": "addon",
+                    "addonId": "mkv",
+                    "type": "movie",
+                    "catalogId": "mkv-movies",
+                    "title": "MKV • Movies"
+                ],
+                tmdbSource(
+                    title: "Asian Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                ),
+                tmdbSource(
+                    title: "Asian Series • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                ),
+                tmdbSource(
+                    title: "Recent Asian Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                )
+            ]
+        ]
+    }
+
+    private static func asianOttFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "Asian OTT & Streaming",
+            "coverEmoji": "📺",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/577eXC8wFQT0eUrJcgznSiFPRmk.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Viki • Popular Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "344",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "iQIYI • Asian Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "584",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "Kocowa • K-Dramas",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "455",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "Asian OTT Movies",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withOriginalLanguage": "ko|zh|ja",
+                        "withWatchProviders": "344|584|455",
+                        "watchRegion": "US"
+                    ]
+                )
+            ]
+        ]
+    }
+
+    private static func kdramaFolder() -> [String: Any] {
+        let filters: [String: Any] = [
+            "withOriginalLanguage": "ko",
+            "withOriginCountry": "KR"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Korean Drama & Film",
+            "coverEmoji": "🇰🇷",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/oaGvjB0DvdurWhqAuTLYV3t4b2o.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "K-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Korean Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Recent K-Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Recent Korean Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: filters
+                )
+            ]
+        ]
+    }
+
+    private static func cdramaFolder() -> [String: Any] {
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "zh",
+            "withOriginCountry": "CN"
+        ]
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "zh"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Chinese Drama & Film",
+            "coverEmoji": "🇨🇳",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "C-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Chinese Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent C-Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Chinese Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                )
+            ]
+        ]
+    }
+
+    private static func animeAndJdramaFolder() -> [String: Any] {
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "ja",
+            "withOriginCountry": "JP"
+        ]
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "ja"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Anime & Japanese Drama",
+            "coverEmoji": "🇯🇵",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/1RgPyOhN4DRs225BGTlHJqCudII.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Japanese Series • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Japanese Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent Japanese Shows",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Japanese Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                )
+            ]
+        ]
+    }
+
+    private static func asianActionFolder() -> [String: Any] {
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "zh|ko|ja|th|id|hk",
+            "withGenres": "28"
+        ]
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "zh|ko|ja|th|id|hk",
+            "withGenres": "10759"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Asian Action & Martial Arts",
+            "coverEmoji": "🥋",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/sSIzzVhhLfgLKVBcAUv0X6cLYz9.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Action & Martial Arts Movies",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Asian Action Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Action Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent Action Shows",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                )
+            ]
+        ]
+    }
+
+    private static func tmdbSource(
         title: String,
         mediaType: String,
         sortBy: String,

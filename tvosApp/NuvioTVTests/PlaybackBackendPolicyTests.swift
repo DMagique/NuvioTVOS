@@ -1204,9 +1204,88 @@ final class PlaybackBackendPolicyTests: XCTestCase {
     func testCacheSegmentMapping() {
         XCTAssertEqual(PlaybackCacheProfile.conservative.aetherForwardBufferSegments, 4)
         XCTAssertEqual(PlaybackCacheProfile.medium.aetherForwardBufferSegments, 10)
-        XCTAssertTrue([10, 20, 30].contains(PlaybackCacheProfile.auto.aetherForwardBufferSegments))
-        XCTAssertEqual(PlaybackCacheProfile.large.aetherForwardBufferSegments, 30)
-        XCTAssertEqual(PlaybackCacheProfile.max.aetherForwardBufferSegments, 60)
+        XCTAssertTrue([4, 10, 18, 25].contains(PlaybackCacheProfile.auto.aetherForwardBufferSegments))
+        XCTAssertEqual(PlaybackCacheProfile.large.aetherForwardBufferSegments, 18)
+        XCTAssertEqual(PlaybackCacheProfile.max.aetherForwardBufferSegments, 25)
+        XCTAssertEqual(PlaybackCacheProfile.ultra.aetherForwardBufferSegments, 25)
+    }
+
+    func testDynamicAutoBufferScaling() {
+        let fourGB: UInt64 = 4 * 1024 * 1024 * 1024
+        let threeGB: UInt64 = 3 * 1024 * 1024 * 1024
+        let twoGB: UInt64 = 2 * 1024 * 1024 * 1024
+
+        let mb1900: size_t = 1900 * 1024 * 1024
+        let mb1500: size_t = 1500 * 1024 * 1024
+        let mb1100: size_t = 1100 * 1024 * 1024
+        let mb900: size_t = 900 * 1024 * 1024
+        let mb500: size_t = 500 * 1024 * 1024
+        let mb300: size_t = 300 * 1024 * 1024
+        let mb100: size_t = 100 * 1024 * 1024
+
+        // High-RAM tier (Apple TV 4K Gen 3 with 4GB RAM + >=1000MB headroom) -> 256MiB / 25 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1500),
+            PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1500),
+            25
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1100),
+            PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1100),
+            25
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb900),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb900),
+            18
+        )
+
+        // Mid-RAM tier (Apple TV 4K Gen 1/2 with 3GB RAM + >=450MB headroom) -> 192MiB / 18 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: threeGB, availableMemoryBytes: mb1900),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: threeGB, availableMemoryBytes: mb1900),
+            18
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: threeGB, availableMemoryBytes: mb500),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: threeGB, availableMemoryBytes: mb500),
+            18
+        )
+
+        // Constrained memory tier (>=250MB headroom) -> 128MiB / 10 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: twoGB, availableMemoryBytes: mb300),
+            PlaybackCacheSettings(forwardBuffer: "128MiB", backBuffer: "32MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: twoGB, availableMemoryBytes: mb300),
+            10
+        )
+
+        // Low memory / emergency tier (<250MB headroom) -> 64MiB / 4 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: twoGB, availableMemoryBytes: mb100),
+            PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: twoGB, availableMemoryBytes: mb100),
+            4
+        )
     }
 
     @MainActor
@@ -3324,6 +3403,52 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
         XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 1, episode: 3))
     }
 
+    func testLastPlaybackStreamStoreTTLExpiredRemoteStreamReturnsNil() {
+        let metaId = "tt-ttl-stream-test"
+        let savedDate = Date(timeIntervalSince1970: 1000)
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: "https://debrid.example.com/stream.mkv",
+            httpHeaders: [:],
+            season: 2,
+            episode: 5,
+            savedAt: savedDate
+        )
+
+        // Loading within TTL (1 hour later) returns the stream
+        let freshDate = savedDate.addingTimeInterval(3600)
+        let freshLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate)
+        XCTAssertNotNil(freshLoad)
+        XCTAssertEqual(freshLoad?.url, "https://debrid.example.com/stream.mkv")
+
+        // Loading past TTL (3 hours later) returns nil and evicts the entry
+        let expiredDate = savedDate.addingTimeInterval(10800)
+        let expiredLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: expiredDate)
+        XCTAssertNil(expiredLoad)
+
+        // Subsequent lookup even at fresh time is now nil because it was evicted
+        XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate))
+    }
+
+    func testLastPlaybackStreamStoreLocalStreamsDoNotExpire() {
+        let metaId = "tt-local-stream-test"
+        let savedDate = Date(timeIntervalSince1970: 1000)
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: "smb://192.168.1.50/share/movie.mkv",
+            httpHeaders: [:],
+            season: nil,
+            episode: nil,
+            savedAt: savedDate
+        )
+
+        // 24 hours later, local stream is still valid
+        let nextDay = savedDate.addingTimeInterval(86400)
+        let loaded = LastPlaybackStreamStore.load(metaId: metaId, season: nil, episode: nil, now: nextDay)
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.url, "smb://192.168.1.50/share/movie.mkv")
+    }
+
     @MainActor
     func testTraktAndSimklContinueWatchingCheckpointsPreserveResumePosition() async {
         let series = makeSeries()
@@ -3359,5 +3484,101 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
         XCTAssertEqual(resolvedSimkl?.position, 1200)
         XCTAssertEqual(resolvedSimkl?.duration, 2400)
         XCTAssertEqual(resolvedSimkl?.remainingText, "20m left")
+    }
+
+    @MainActor
+    func testNowPlayingArtworkResolutionForMoviesAndEpisodes() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "AetherEngine" }, loadDispatcher: { _, _, _ in })
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+
+        // 1. Movie with poster and backdrop prefers poster
+        let movie = NuvioMeta(
+            id: "tt1375666",
+            name: "Inception",
+            description: "A thief who steals corporate secrets...",
+            posterUrl: "https://image.tmdb.org/t/p/w500/poster.jpg",
+            backgroundUrl: "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            logoUrl: nil,
+            imdbId: "tt1375666",
+            tmdbId: 27205,
+            type: "movie",
+            year: 2010,
+            genres: ["Action", "Sci-Fi"],
+            rating: 8.8,
+            releaseInfo: "2010",
+            runtime: "148 min",
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil,
+            status: nil,
+            videos: nil,
+            trailerYtIds: nil,
+            externalRatings: nil,
+            posterShape: nil
+        )
+        let movieArtwork = model.resolveArtworkURL(for: movie, episode: nil, isTrailer: false)
+        XCTAssertEqual(movieArtwork, URL(string: "https://image.tmdb.org/t/p/w500/poster.jpg"))
+
+        // 2. Series episode with thumbnail prefers episode thumbnail
+        let ep1 = NuvioVideo(
+            id: "tt0903747:1:1",
+            title: "Pilot",
+            season: 1,
+            episode: 1,
+            thumbnail: "https://image.tmdb.org/t/p/w500/ep1_thumb.jpg",
+            overview: "A high school chemistry teacher...",
+            released: "2008-01-20",
+            rating: "9.0"
+        )
+        let series = NuvioMeta(
+            id: "tt0903747",
+            name: "Breaking Bad",
+            description: "A chemistry teacher diagnosed with inoperable lung cancer...",
+            posterUrl: "https://image.tmdb.org/t/p/w500/series_poster.jpg",
+            backgroundUrl: "https://image.tmdb.org/t/p/w1280/series_backdrop.jpg",
+            logoUrl: nil,
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            type: "series",
+            year: 2008,
+            genres: ["Drama", "Crime"],
+            rating: 9.5,
+            releaseInfo: "2008-2013",
+            runtime: "47 min",
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil,
+            status: "Ended",
+            videos: [ep1],
+            trailerYtIds: nil,
+            externalRatings: nil,
+            posterShape: nil
+        )
+        let ep1Artwork = model.resolveArtworkURL(for: series, episode: ep1, isTrailer: false)
+        XCTAssertEqual(ep1Artwork, URL(string: "https://image.tmdb.org/t/p/w500/ep1_thumb.jpg"))
+
+        // 3. Series episode without thumbnail falls back to series background
+        let ep2NoThumb = NuvioVideo(
+            id: "tt0903747:1:2",
+            title: "Cat's in the Bag...",
+            season: 1,
+            episode: 2,
+            thumbnail: nil,
+            overview: nil,
+            released: nil,
+            rating: nil
+        )
+        let ep2Artwork = model.resolveArtworkURL(for: series, episode: ep2NoThumb, isTrailer: false)
+        XCTAssertEqual(ep2Artwork, URL(string: "https://image.tmdb.org/t/p/w1280/series_backdrop.jpg"))
+
+        // 4. Trailer uses movie poster/backdrop
+        let trailerArtwork = model.resolveArtworkURL(for: movie, episode: nil, isTrailer: true)
+        XCTAssertEqual(trailerArtwork, URL(string: "https://image.tmdb.org/t/p/w500/poster.jpg"))
     }
 }

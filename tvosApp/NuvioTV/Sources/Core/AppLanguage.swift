@@ -216,7 +216,9 @@ final class AppLocaleManager: ObservableObject {
 
     /// Updates language from a stored tag (settings UI / profile switch).
     func applyStoredTag(_ raw: String?) {
-        setLanguage(AppLanguage.fromStored(raw), persist: true)
+        let next = AppLanguage.fromStored(raw)
+        guard next != language else { return }
+        setLanguage(next, persist: true)
     }
 
     func setLanguage(_ next: AppLanguage, persist: Bool = true) {
@@ -226,6 +228,7 @@ final class AppLocaleManager: ObservableObject {
             ProfileSettings.current.set(next.tag, forKey: Self.storageKey)
             UserDefaults.standard.set(next.tag, forKey: Self.storageKey)
         }
+        guard next != previous || persist else { return }
         language = next
         applyToProcess(next, bumpRevision: previous != next)
     }
@@ -250,7 +253,6 @@ final class AppLocaleManager: ObservableObject {
             defaults.set([language.tag], forKey: "AppleLanguages")
             defaults.set(language.tag, forKey: "AppleLocale")
         }
-        defaults.synchronize()
         L10n.reload(languageTag: language == .system ? nil : language.tag)
         if bumpRevision {
             revision &+= 1

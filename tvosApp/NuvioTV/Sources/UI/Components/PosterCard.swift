@@ -212,6 +212,8 @@ struct PosterCard: View {
     /// Lets Home retain off-window artwork without leaving every card in the
     /// tvOS focus graph.
     var allowsFocus: Bool = true
+    /// Optional upward-focus fallback for Home's lazy vertical rows. The
+    /// handler deliberately stays off the default path for other directions.
     var onMove: ((MoveCommandDirection) -> Void)? = nil
     var isWatched: Bool? = nil
     let onClick: () -> Void
@@ -240,6 +242,9 @@ struct PosterCard: View {
 
     var body: some View {
         #if os(tvOS)
+        // Keep directional input in tvOS's focus engine. Per-card move
+        // handlers bypass the clickpad dead zone and can turn a light touch
+        // into an immediate focus change.
         Button(action: onClick) {
             posterContent
         }
@@ -366,7 +371,7 @@ struct PosterCard: View {
             // trailer is ready to draw, avoiding a black frame on slow links.
             .opacity(isTrailerPreviewVisible ? 0 : 1)
             .overlay {
-                if isFocused && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
+                if isTrailerPreviewActive && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
                     TrailerPreviewPlayer(
                         meta: meta,
                         isActive: isTrailerPreviewActive,
@@ -1153,9 +1158,8 @@ struct PosterGridCard: View {
     /// Forces the title/subtitle caption to render regardless of the user's
     /// global poster-labels setting (used by Search's Netflix-style grid).
     var forceShowLabels = false
-    /// Optional directional-command hook installed on the focusable Button
-    /// itself. Container-level handlers can miss commands consumed by tvOS's
-    /// focus engine before they bubble out of a poster.
+    /// Optional directional-command hook used by grid search views to transfer
+    /// focus to their keyboard controls at a grid boundary.
     var onMove: ((MoveCommandDirection) -> Void)? = nil
     let action: () -> Void
 
@@ -1301,6 +1305,7 @@ struct OptionalMoveCommandHandler: ViewModifier {
         }
     }
 }
+
 #endif
 
 #if canImport(UIKit)
@@ -1769,8 +1774,17 @@ actor PosterArtworkCache {
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
 
     init() {
-        cache.countLimit = 220
-        cache.totalCostLimit = 140 * 1024 * 1024
+        let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        if gib > 3.5 {
+            cache.countLimit = 220
+            cache.totalCostLimit = 140 * 1024 * 1024 // 140 MB (Apple TV 4K Gen 2/3)
+        } else if gib > 2.5 {
+            cache.countLimit = 160
+            cache.totalCostLimit = 100 * 1024 * 1024 // 100 MB (Apple TV 4K Gen 1)
+        } else {
+            cache.countLimit = 90
+            cache.totalCostLimit = 60 * 1024 * 1024  // 60 MB (Apple TV HD)
+        }
         #if canImport(UIKit)
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -1924,7 +1938,8 @@ actor PosterDiskCache {
     private static let storageVersion = "v2"
 
     init() {
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         directory = caches.appendingPathComponent("poster_artwork", isDirectory: true)
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     }
@@ -2009,9 +2024,11 @@ private let posterURLSession: URLSession = {
     config.timeoutIntervalForRequest = 10
     config.timeoutIntervalForResource = 20
     config.httpMaximumConnectionsPerHost = 10
+    let totalRam = ProcessInfo.processInfo.physicalMemory
+    let isLegacyDevice = totalRam <= 2_500_000_000 // <= 2.5 GB (Apple TV HD)
     config.urlCache = URLCache(
-        memoryCapacity: 20 * 1024 * 1024,
-        diskCapacity: 100 * 1024 * 1024,
+        memoryCapacity: isLegacyDevice ? (8 * 1024 * 1024) : (20 * 1024 * 1024),
+        diskCapacity: isLegacyDevice ? (50 * 1024 * 1024) : (100 * 1024 * 1024),
         diskPath: "nuvio_poster_urlcache"
     )
     return URLSession(configuration: config)

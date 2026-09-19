@@ -694,30 +694,98 @@ struct StreamAddonManifestResource: Decodable {
     }
 }
 
-private struct StreamAddonResponse: Decodable {
+struct StreamAddonResponse: Decodable {
     let streams: [StreamAddonStreamDTO]?
 
     enum CodingKeys: String, CodingKey {
         case streams
     }
 
+    init(streams: [StreamAddonStreamDTO]? = nil) {
+        self.streams = streams
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.streams = try? container.decodeIfPresent([StreamAddonStreamDTO].self, forKey: .streams)
+        if let lossy = try? container.decodeIfPresent(LossyStreamList.self, forKey: .streams) {
+            self.streams = lossy.elements
+        } else if let direct = try? container.decodeIfPresent([StreamAddonStreamDTO].self, forKey: .streams) {
+            self.streams = direct
+        } else {
+            self.streams = nil
+        }
     }
 }
 
-private struct StreamSubtitleResponse: Decodable {
+private struct LossyStreamList: Decodable {
+    var elements: [StreamAddonStreamDTO] = []
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let item = try? container.decode(StreamAddonStreamDTO.self) {
+                elements.append(item)
+                continue
+            }
+            if (try? container.decode(DiscardedStreamItem.self)) == nil,
+               (try? container.decode([DiscardedStreamItem].self)) == nil,
+               (try? container.decode(String.self)) == nil,
+               (try? container.decode(Double.self)) == nil,
+               (try? container.decode(Bool.self)) == nil,
+               (try? container.decodeNil()) != true {
+                break
+            }
+        }
+    }
+
+    private struct DiscardedStreamItem: Decodable {}
+}
+
+struct StreamSubtitleResponse: Decodable {
     let subtitles: [StreamAddonSubtitleDTO]?
 
     enum CodingKeys: String, CodingKey {
         case subtitles
     }
 
+    init(subtitles: [StreamAddonSubtitleDTO]? = nil) {
+        self.subtitles = subtitles
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.subtitles = try? container.decodeIfPresent([StreamAddonSubtitleDTO].self, forKey: .subtitles)
+        if let lossy = try? container.decodeIfPresent(LossySubtitleList.self, forKey: .subtitles) {
+            self.subtitles = lossy.elements
+        } else if let direct = try? container.decodeIfPresent([StreamAddonSubtitleDTO].self, forKey: .subtitles) {
+            self.subtitles = direct
+        } else {
+            self.subtitles = nil
+        }
     }
+}
+
+private struct LossySubtitleList: Decodable {
+    var elements: [StreamAddonSubtitleDTO] = []
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            if let item = try? container.decode(StreamAddonSubtitleDTO.self) {
+                elements.append(item)
+                continue
+            }
+            if (try? container.decode(DiscardedSubtitleItem.self)) == nil,
+               (try? container.decode([DiscardedSubtitleItem].self)) == nil,
+               (try? container.decode(String.self)) == nil,
+               (try? container.decode(Double.self)) == nil,
+               (try? container.decode(Bool.self)) == nil,
+               (try? container.decodeNil()) != true {
+                break
+            }
+        }
+    }
+
+    private struct DiscardedSubtitleItem: Decodable {}
 }
 
 struct StreamAddonStreamDTO: Decodable {
@@ -732,6 +800,61 @@ struct StreamAddonStreamDTO: Decodable {
     let fileIdx: Int?
     let sources: [String]?
     let clientResolve: StreamAddonClientResolveDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case url, externalUrl, name, title, description, subtitles, behaviorHints, infoHash, fileIdx, sources, clientResolve
+    }
+
+    init(
+        url: String? = nil,
+        externalUrl: String? = nil,
+        name: String? = nil,
+        title: String? = nil,
+        description: String? = nil,
+        subtitles: [StreamAddonSubtitleDTO]? = nil,
+        behaviorHints: StreamAddonBehaviorHints? = nil,
+        infoHash: String? = nil,
+        fileIdx: Int? = nil,
+        sources: [String]? = nil,
+        clientResolve: StreamAddonClientResolveDTO? = nil
+    ) {
+        self.url = url
+        self.externalUrl = externalUrl
+        self.name = name
+        self.title = title
+        self.description = description
+        self.subtitles = subtitles
+        self.behaviorHints = behaviorHints
+        self.infoHash = infoHash
+        self.fileIdx = fileIdx
+        self.sources = sources
+        self.clientResolve = clientResolve
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.url = try? container.decodeIfPresent(String.self, forKey: .url)
+        self.externalUrl = try? container.decodeIfPresent(String.self, forKey: .externalUrl)
+        self.name = try? container.decodeIfPresent(String.self, forKey: .name)
+        self.title = try? container.decodeIfPresent(String.self, forKey: .title)
+        self.description = try? container.decodeIfPresent(String.self, forKey: .description)
+        if let lossySubs = try? container.decodeIfPresent(LossySubtitleList.self, forKey: .subtitles) {
+            self.subtitles = lossySubs.elements
+        } else {
+            self.subtitles = try? container.decodeIfPresent([StreamAddonSubtitleDTO].self, forKey: .subtitles)
+        }
+        self.behaviorHints = try? container.decodeIfPresent(StreamAddonBehaviorHints.self, forKey: .behaviorHints)
+        self.infoHash = try? container.decodeIfPresent(String.self, forKey: .infoHash)
+        if let intVal = try? container.decodeIfPresent(Int.self, forKey: .fileIdx) {
+            self.fileIdx = intVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .fileIdx) {
+            self.fileIdx = Int(strVal)
+        } else {
+            self.fileIdx = nil
+        }
+        self.sources = (try? container.decodeIfPresent([String?].self, forKey: .sources))?.compactMap { $0 }
+        self.clientResolve = try? container.decodeIfPresent(StreamAddonClientResolveDTO.self, forKey: .clientResolve)
+    }
 
     func toNuvioStream(addonName: String) -> NuvioStream? {
         let resolve = clientResolve
@@ -796,6 +919,39 @@ struct StreamAddonClientResolveDTO: Decodable {
     let magnetUri: String?
     let sources: [String]?
     let filename: String?
+
+    enum CodingKeys: String, CodingKey {
+        case infoHash, fileIdx, magnetUri, sources, filename
+    }
+
+    init(
+        infoHash: String? = nil,
+        fileIdx: Int? = nil,
+        magnetUri: String? = nil,
+        sources: [String]? = nil,
+        filename: String? = nil
+    ) {
+        self.infoHash = infoHash
+        self.fileIdx = fileIdx
+        self.magnetUri = magnetUri
+        self.sources = sources
+        self.filename = filename
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.infoHash = try? container.decodeIfPresent(String.self, forKey: .infoHash)
+        if let intVal = try? container.decodeIfPresent(Int.self, forKey: .fileIdx) {
+            self.fileIdx = intVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .fileIdx) {
+            self.fileIdx = Int(strVal)
+        } else {
+            self.fileIdx = nil
+        }
+        self.magnetUri = try? container.decodeIfPresent(String.self, forKey: .magnetUri)
+        self.sources = (try? container.decodeIfPresent([String?].self, forKey: .sources))?.compactMap { $0 }
+        self.filename = try? container.decodeIfPresent(String.self, forKey: .filename)
+    }
 }
 
 struct StreamAddonSubtitleDTO: Decodable {
@@ -865,10 +1021,121 @@ struct StreamAddonBehaviorHints: Decodable {
     let trickplay: String?
     let trickplayUrl: String?
     let storyboard: String?
+
+    enum CodingKeys: String, CodingKey {
+        case videoSize, filename, bingeGroup, cached, isCached, proxyHeaders, trickplay, trickplayUrl, storyboard
+    }
+
+    init(
+        videoSize: Int64? = nil,
+        filename: String? = nil,
+        bingeGroup: String? = nil,
+        cached: Bool? = nil,
+        isCached: Bool? = nil,
+        proxyHeaders: StreamAddonProxyHeaders? = nil,
+        trickplay: String? = nil,
+        trickplayUrl: String? = nil,
+        storyboard: String? = nil
+    ) {
+        self.videoSize = videoSize
+        self.filename = filename
+        self.bingeGroup = bingeGroup
+        self.cached = cached
+        self.isCached = isCached
+        self.proxyHeaders = proxyHeaders
+        self.trickplay = trickplay
+        self.trickplayUrl = trickplayUrl
+        self.storyboard = storyboard
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let num = try? container.decodeIfPresent(Int64.self, forKey: .videoSize) {
+            self.videoSize = num
+        } else if let dbl = try? container.decodeIfPresent(Double.self, forKey: .videoSize) {
+            self.videoSize = Int64(dbl)
+        } else if let str = try? container.decodeIfPresent(String.self, forKey: .videoSize) {
+            self.videoSize = Int64(str) ?? Double(str).map(Int64.init)
+        } else {
+            self.videoSize = nil
+        }
+        self.filename = try? container.decodeIfPresent(String.self, forKey: .filename)
+        self.bingeGroup = try? container.decodeIfPresent(String.self, forKey: .bingeGroup)
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .cached) {
+            self.cached = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .cached) {
+            self.cached = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .cached) {
+            self.cached = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.cached = nil
+        }
+
+        if let b = try? container.decodeIfPresent(Bool.self, forKey: .isCached) {
+            self.isCached = b
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .isCached) {
+            self.isCached = (i != 0)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .isCached) {
+            self.isCached = (s.lowercased() == "true" || s == "1")
+        } else {
+            self.isCached = nil
+        }
+
+        self.proxyHeaders = try? container.decodeIfPresent(StreamAddonProxyHeaders.self, forKey: .proxyHeaders)
+        self.trickplay = try? container.decodeIfPresent(String.self, forKey: .trickplay)
+        self.trickplayUrl = try? container.decodeIfPresent(String.self, forKey: .trickplayUrl)
+
+        if let s = try? container.decodeIfPresent(String.self, forKey: .storyboard) {
+            self.storyboard = s
+        } else if let dict = try? container.decodeIfPresent([String: String].self, forKey: .storyboard),
+                  let url = dict["url"] {
+            self.storyboard = url
+        } else {
+            self.storyboard = nil
+        }
+    }
 }
 
 /// Stremio stream add-ons can require request headers for the media host.
 /// Response headers describe proxy behavior and are not sent by clients.
 struct StreamAddonProxyHeaders: Decodable {
     let request: [String: String]?
+
+    enum CodingKeys: String, CodingKey {
+        case request
+    }
+
+    init(request: [String: String]? = nil) {
+        self.request = request
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let dict = try? container.decodeIfPresent([String: String].self, forKey: .request) {
+            self.request = dict
+        } else if let rawDict = try? container.decodeIfPresent([String: LossyPrimitiveString].self, forKey: .request) {
+            self.request = rawDict.compactMapValues(\.value)
+        } else {
+            self.request = nil
+        }
+    }
+}
+
+private struct LossyPrimitiveString: Decodable {
+    let value: String?
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let s = try? container.decode(String.self) {
+            value = s
+        } else if let i = try? container.decode(Int.self) {
+            value = String(i)
+        } else if let d = try? container.decode(Double.self) {
+            value = String(d)
+        } else if let b = try? container.decode(Bool.self) {
+            value = String(b)
+        } else {
+            value = nil
+        }
+    }
 }

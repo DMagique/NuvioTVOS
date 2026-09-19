@@ -112,7 +112,6 @@ final class AuthReauthFlowTests: XCTestCase {
         XCTAssertEqual(result.webUrl, "\(AuthConfig.tvLoginWebBaseURL)?code=FALLBACKCODE")
     }
 }
-
 final class TraktProfileIsolationTests: XCTestCase {
     private var primaryID = ""
     private var secondaryID = ""
@@ -297,5 +296,69 @@ final class MdbListProfileIsolationTests: XCTestCase {
         ProfileSettings.setActiveProfile(primaryID, isPrimary: true)
         XCTAssertFalse(ProfileSettings.isActiveStore(secondary))
         XCTAssertFalse(RemoteTrackingState.isProgressSourceAuthenticated(.mdblist, in: secondary))
+    }
+}
+
+final class ProfileManagerLimitTests: XCTestCase {
+    private var tempDir: URL!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("profile-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tempDir)
+        try super.tearDownWithError()
+    }
+
+    func testProfileLimitEnforcedInProfileManager() throws {
+        let manager = try ProfileManager(baseDir: tempDir.path)
+
+        // Initially 0 profiles, can create up to 6
+        XCTAssertTrue(manager.canCreateProfile)
+
+        for i in 1...6 {
+            XCTAssertTrue(manager.canCreateProfile, "Should be able to create profile \(i)")
+            _ = try manager.createProfile(input: CreateProfileInput(name: "User \(i)", profileType: .adult, avatarId: "", pin: nil))
+        }
+
+        XCTAssertEqual(try manager.getProfiles().count, 6)
+        XCTAssertFalse(manager.canCreateProfile, "canCreateProfile should be false when 6 profiles exist")
+
+        // 7th profile should throw maxProfilesReached
+        XCTAssertThrowsError(try manager.createProfile(input: CreateProfileInput(name: "User 7", profileType: .adult, avatarId: "", pin: nil))) { error in
+            guard let managerError = error as? ProfileManagerError else {
+                return XCTFail("Expected ProfileManagerError but got \(error)")
+            }
+            XCTAssertEqual(managerError, .maxProfilesReached)
+            XCTAssertEqual(managerError.errorDescription, "You've reached the maximum of 6 profiles. Remove one to create another.")
+        }
+
+        // Count must remain 6
+        XCTAssertEqual(try manager.getProfiles().count, 6)
+    }
+
+    @MainActor
+    func testProfileViewModelCanAddProfileAndErrorHandling() throws {
+        let manager = try ProfileManager(baseDir: tempDir.path)
+        for i in 1...6 {
+            _ = try manager.createProfile(input: CreateProfileInput(name: "User \(i)", profileType: .adult, avatarId: "", pin: nil))
+        }
+
+        let viewModel = ProfileViewModel(profileManager: manager)
+        XCTAssertEqual(viewModel.profiles.count, 6)
+        XCTAssertFalse(viewModel.canAddProfile, "canAddProfile should be false when at limit")
+
+        viewModel.createProfile(name: "Overflow", pin: nil)
+        XCTAssertEqual(viewModel.profileCreationError, "You've reached the maximum of 6 profiles. Remove one to create another.")
+
+        // Delete one profile to free up a slot
+        if let first = viewModel.profiles.first {
+            try manager.deleteProfile(id: first.id)
+            viewModel.loadProfiles()
+            XCTAssertTrue(viewModel.canAddProfile, "canAddProfile should be true after deleting a profile")
+        }
     }
 }

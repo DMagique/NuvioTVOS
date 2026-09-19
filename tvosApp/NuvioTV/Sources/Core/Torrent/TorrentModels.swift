@@ -226,6 +226,25 @@ final class PieceWaiterRegistry: @unchecked Sendable {
     }
 }
 
+final class OnceGate<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Never>?
+
+    func arm(_ continuation: CheckedContinuation<T, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.continuation = continuation
+    }
+
+    func resume(_ value: T) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
+}
+
 enum NetworkIO {
     enum Failure: Error {
         case closed

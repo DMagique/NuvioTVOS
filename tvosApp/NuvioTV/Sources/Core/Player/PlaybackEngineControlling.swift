@@ -165,6 +165,7 @@ struct PlaybackDebugInfo: Equatable {
 @MainActor
 protocol PlaybackEngineControlling: AnyObject {
     var onPlaybackSuspended: ((Int64, Int64) -> Void)? { get set }
+    var onFirstFrameReady: (() -> Void)? { get set }
 
     var audioTracks: [PlaybackTrackInfo] { get }
     var subtitleTracks: [PlaybackTrackInfo] { get }
@@ -176,6 +177,7 @@ protocol PlaybackEngineControlling: AnyObject {
     var isPlayerEnded: Bool { get }
     var isAtEndOfFile: Bool { get }
     var hasCoherentTimeSample: Bool { get }
+    var hasFirstFrameReadyForDisplay: Bool { get }
     var durationMs: Int64 { get }
     var positionMs: Int64 { get }
     var bufferedMs: Int64 { get }

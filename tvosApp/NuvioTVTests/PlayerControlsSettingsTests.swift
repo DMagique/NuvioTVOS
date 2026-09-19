@@ -236,7 +236,6 @@ final class PlayerControlsSettingsTests: XCTestCase {
         XCTAssertFalse(externalTrack.externalFilename.isEmpty)
     }
 }
-
 @MainActor
 private final class ControlledScrubThumbnailProvider: ScrubThumbnailProviding {
     var supportsScrubThumbnails = true
@@ -634,6 +633,55 @@ extension PlayerControlsSettingsTests {
         model.stopRepeatingSkip()
         XCTAssertFalse(model.isHoldingSeek)
         XCTAssertNil(model.seekSpeedMultiplier)
+    }
+
+    @MainActor
+    func testRemoteTouchScrubEntryHasNoThresholdJump() {
+        let provider = ControlledScrubThumbnailProvider()
+        let model = PlayerViewModel(
+            sessionCoordinator: PlaybackSessionCoordinator(aetherControllerFactory: { nil }),
+            scrubThumbnailProvider: provider
+        )
+        model.status = .playing
+        model.time = PlayerTime(current: 500, duration: 7200)
+
+        // Gesture begins from resting state
+        model.remoteTouchBegan()
+        XCTAssertFalse(model.isScrubbing)
+
+        // Movement under threshold does not engage scrub
+        model.remoteTouchMoved(dx: 20, dy: 0)
+        XCTAssertFalse(model.isScrubbing)
+
+        // Movement crosses horizontal threshold (45pt)
+        model.remoteTouchMoved(dx: 50, dy: 0)
+        XCTAssertTrue(model.isScrubbing)
+        // Scrub target must start at current position without a 50pt teleport jump
+        XCTAssertEqual(model.clock.scrubTarget, 500)
+
+        // Gentle subsequent incremental movement (slow finger slide: ~2pt per tick)
+        for step in 1...5 {
+            model.remoteTouchMoved(dx: 50 + CGFloat(step * 2), dy: 0)
+        }
+        model.remoteTouchEnded(dx: 60, dy: 0)
+        if let target = model.clock.scrubTarget {
+            // 5 steps of 2 points @ 0.08s/pt (multiplier = 1.0) = +0.8s -> 500.8s
+            XCTAssertEqual(target, 500.8, accuracy: 0.1)
+        } else {
+            XCTFail("Scrub target should be non-nil")
+        }
+
+        // Second stroke: Fast flick (+15 points in a single frame tick) while scrubbing
+        model.remoteTouchBegan()
+        model.remoteTouchMoved(dx: 15, dy: 0)
+        model.remoteTouchEnded(dx: 15, dy: 0)
+        if let target = model.clock.scrubTarget {
+            // 15 points in 1 tick at high velocity accelerates to ~5-7 seconds rather than old linear 34s
+            XCTAssertGreaterThan(target, 505.0)
+            XCTAssertLessThan(target, 515.0)
+        }
+
+        XCTAssertTrue(model.isScrubbing)
     }
 }
 

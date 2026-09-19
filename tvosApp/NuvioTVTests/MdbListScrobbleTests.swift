@@ -511,7 +511,10 @@ private final class MdbListCatalogRepository: MockCatalogRepository {
 private final class MdbListURLProtocolStub: URLProtocol {
     static var handler: ((URLRequest) -> (HTTPURLResponse, Data))?
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let host = request.url?.host else { return false }
+        return host.contains("mdblist.com")
+    }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 

@@ -90,14 +90,37 @@ final class SMBLibraryIndex: ObservableObject {
         persist()
     }
 
+    private static let storageDirectoryName = "smbLibraryIndex"
+    private static var storageKey: String {
+        let profileId = ProfileSettings.activeProfileID ?? "default"
+        return "smbLibraryIndex.\(profileId)"
+    }
+
     private func persist() {
         guard let data = try? JSONEncoder().encode(titlesByServerID) else { return }
-        ProfileSettings.current.set(data, forKey: SettingsKey.smbLibraryIndex)
+        if LargePayloadStore.write(data, key: Self.storageKey, directory: Self.storageDirectoryName) {
+            ProfileSettings.current.removeObject(forKey: SettingsKey.smbLibraryIndex)
+            UserDefaults.standard.removeObject(forKey: SettingsKey.smbLibraryIndex)
+        }
         NotificationCenter.default.post(name: Self.changedNotification, object: nil)
     }
 
     private static func load() -> [String: [SMBIndexedTitle]] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.smbLibraryIndex),
+        let key = storageKey
+        let data: Data? = {
+            if let fileData = LargePayloadStore.read(key: key, directory: storageDirectoryName) {
+                return fileData
+            }
+            guard let legacy = ProfileSettings.current.data(forKey: SettingsKey.smbLibraryIndex) ?? UserDefaults.standard.data(forKey: SettingsKey.smbLibraryIndex) else {
+                return nil
+            }
+            if LargePayloadStore.write(legacy, key: key, directory: storageDirectoryName) {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.smbLibraryIndex)
+                UserDefaults.standard.removeObject(forKey: SettingsKey.smbLibraryIndex)
+            }
+            return legacy
+        }()
+        guard let data,
               let decoded = try? JSONDecoder().decode([String: [SMBIndexedTitle]].self, from: data) else {
             return [:]
         }

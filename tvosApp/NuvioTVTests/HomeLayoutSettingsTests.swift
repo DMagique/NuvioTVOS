@@ -3,6 +3,10 @@ import SwiftUI
 @testable import NuvioTV
 
 final class HomeLayoutSettingsTests: XCTestCase {
+    override func tearDown() {
+        ProfileSettings.clearActiveProfile()
+        super.tearDown()
+    }
     private func title(_ id: String, type: String = "movie") throws -> NuvioMeta {
         let data = try JSONSerialization.data(withJSONObject: ["id": id, "type": type, "name": id])
         return try JSONDecoder().decode(NuvioMeta.self, from: data)
@@ -354,6 +358,28 @@ final class HomeLayoutSettingsTests: XCTestCase {
     }
 
     func testRowEnabledChecksCinemetaDisabled() {
+        let savedPrefs = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestStates)
+        let savedURLs = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestURLs)
+        let savedSingleURL = ProfileSettings.current.string(forKey: SettingsKey.streamAddonManifestURL)
+        let savedDisabledCatalogs = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabled)
+        let savedDisabledAddons = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+        let savedDisabledNames = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabledAddonNames)
+        defer {
+            ProfileSettings.current.set(savedPrefs, forKey: SettingsKey.streamAddonManifestStates)
+            ProfileSettings.current.set(savedURLs, forKey: SettingsKey.streamAddonManifestURLs)
+            ProfileSettings.current.set(savedSingleURL, forKey: SettingsKey.streamAddonManifestURL)
+            ProfileSettings.current.set(savedDisabledCatalogs, forKey: SettingsKey.homeCatalogDisabled)
+            ProfileSettings.current.set(savedDisabledAddons, forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+            ProfileSettings.current.set(savedDisabledNames, forKey: SettingsKey.homeCatalogDisabledAddonNames)
+            CinemetaCatalogRepository.setCinemetaDisabled(false)
+        }
+        ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestStates)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestURLs)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.streamAddonManifestURL)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabled)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonIDs)
+        ProfileSettings.current.removeObject(forKey: SettingsKey.homeCatalogDisabledAddonNames)
+
         let row = TVHomeCatalogOrder.SnapshotRow(
             id: "movie_top",
             title: "Popular - Movies",
@@ -369,9 +395,6 @@ final class HomeLayoutSettingsTests: XCTestCase {
 
         CinemetaCatalogRepository.setCinemetaDisabled(true)
         XCTAssertFalse(TVHomeCatalogOrder.isRowEnabled(row))
-
-        // Reset
-        CinemetaCatalogRepository.setCinemetaDisabled(false)
     }
 
     func testWriteSnapshotPreservesActiveRowsWhenMissingFromLiveSections() {
@@ -582,6 +605,185 @@ final class HomeLayoutSettingsTests: XCTestCase {
         XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .poster, layoutMode: "Modern"), 210)
         XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .poster, layoutMode: "Compact"), 170)
         XCTAssertEqual(TVCollectionFolderCardLayout.cardWidth(shape: .square, layoutMode: "Modern"), 315)
+    }
+
+    func testLargePayloadStorePurgesLegacyOversizedPreferences() {
+        let suite = UserDefaults(suiteName: "nuvio.test.purge.\(UUID().uuidString)")!
+        defer { suite.removePersistentDomain(forName: suite.description) }
+
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.settings.layout.homeCatalogTitles")
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.settings.integrations.jellyfinLibraryIndex")
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.settings.integrations.smbLibraryIndex")
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.bingeGroup.tt12345")
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.lastStreamQuality.tt12345")
+        suite.set("legacy-data".data(using: .utf8), forKey: "nuvio.tv.lastPlaybackStream.tt12345")
+        suite.set("safe-value", forKey: SettingsKey.theme)
+
+        LargePayloadStore.purgeLegacyOversizedPreferences(in: suite)
+
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.settings.layout.homeCatalogTitles"))
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.settings.integrations.jellyfinLibraryIndex"))
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.settings.integrations.smbLibraryIndex"))
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.bingeGroup.tt12345"))
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.lastStreamQuality.tt12345"))
+        XCTAssertNil(suite.data(forKey: "nuvio.tv.lastPlaybackStream.tt12345"))
+        XCTAssertEqual(suite.string(forKey: SettingsKey.theme), "safe-value")
+    }
+
+    func testTVHomeCatalogOrderSnapshotStorageViaLargePayloadStore() {
+        let testProfileID = "test-profile-\(UUID().uuidString)"
+        let suite = ProfileSettings.store(for: testProfileID)
+
+        let rows = [
+            TVHomeCatalogOrder.SnapshotRow(
+                id: "addon_test_row",
+                title: "Test Row",
+                addonName: "Torrentio",
+                addonId: "torrentio",
+                contentType: "movie",
+                catalogId: "top",
+                settingsKey: "torrentio_movie_top",
+                posterShape: "poster"
+            )
+        ]
+
+        TVHomeCatalogOrder.writeSnapshotRows(rows, in: suite)
+
+        // UserDefaults should NOT hold the snapshot data directly
+        XCTAssertNil(suite.data(forKey: SettingsKey.homeCatalogTitles))
+
+        // snapshotRows should read back from LargePayloadStore correctly
+        let loaded = TVHomeCatalogOrder.snapshotRows(in: suite)
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded.first?.id, "addon_test_row")
+        XCTAssertEqual(loaded.first?.title, "Test Row")
+        XCTAssertEqual(loaded.first?.addonName, "Torrentio")
+    }
+
+    func testBingeGroupStoreAndStreamQualityStoresViaLargePayloadStore() {
+        let testProfileID = "test-profile-\(UUID().uuidString)"
+
+        BingeGroupStore.save(
+            seriesId: "tt99999",
+            bingeGroup: "release-group-x",
+            addonName: "Torrentio",
+            releaseFingerprint: "fingerprint-123",
+            resolution: 1080,
+            quality: .bluray,
+            isCached: true,
+            profileId: testProfileID
+        )
+
+        let loadedBinge = BingeGroupStore.load(seriesId: "tt99999", profileId: testProfileID)
+        XCTAssertNotNil(loadedBinge)
+        XCTAssertEqual(loadedBinge?.bingeGroup, "release-group-x")
+        XCTAssertEqual(loadedBinge?.addonName, "Torrentio")
+        XCTAssertEqual(loadedBinge?.resolution, 1080)
+
+        // StreamQualityTags store
+        let tags = StreamQualityTags(
+            resolution: 2160,
+            isDolbyVision: true,
+            isHDR: true,
+            isAtmos: true,
+            isCached: true,
+            quality: .webDl,
+            bingeGroup: "release-group-x"
+        )
+        LastStreamQualityStore.save(metaId: "tt99999", tags: tags, profileId: testProfileID)
+
+        let loadedTags = LastStreamQualityStore.load(metaId: "tt99999", profileId: testProfileID)
+        XCTAssertNotNil(loadedTags)
+        XCTAssertEqual(loadedTags?.resolution, 2160)
+        XCTAssertTrue(loadedTags?.isDolbyVision ?? false)
+        XCTAssertTrue(loadedTags?.isAtmos ?? false)
+
+        // LastPlaybackStream store
+        LastPlaybackStreamStore.save(
+            metaId: "tt99999",
+            url: "https://example.com/stream.mkv",
+            httpHeaders: ["User-Agent": "Nuvio"],
+            season: 1,
+            episode: 2,
+            profileId: testProfileID
+        )
+
+        let loadedPlayback = LastPlaybackStreamStore.load(
+            metaId: "tt99999",
+            season: 1,
+            episode: 2,
+            profileId: testProfileID
+        )
+        XCTAssertNotNil(loadedPlayback)
+        XCTAssertEqual(loadedPlayback?.url, "https://example.com/stream.mkv")
+        XCTAssertEqual(loadedPlayback?.httpHeaders["User-Agent"], "Nuvio")
+    }
+
+    func testProfileSettingsStoreIsReadOnlyAndDoesNotMutateOversizedSuite() {
+        let profileId = "test-readonly-\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: "nuvio.tv.profile.settings.\(profileId)")!
+        defer {
+            ProfileSettings.clearActiveProfile()
+            suite.removePersistentDomain(forName: "nuvio.tv.profile.settings.\(profileId)")
+        }
+
+        // Simulate legacy unpurged data in the suite before activation
+        let dummyData = Data(repeating: 0x41, count: 100_000)
+        suite.set(dummyData, forKey: "nuvio.tv.settings.layout.homeCatalogTitles")
+
+        // Calling store(for:) MUST be completely read-only and not set the profileScopeKey
+        let retrievedStore = ProfileSettings.store(for: profileId)
+        XCTAssertNil(retrievedStore.string(forKey: "nuvio.tv.profile.settings.profileID"))
+
+        // Activating the profile purges the legacy blob and marks the suite safely
+        ProfileSettings.setActiveProfile(profileId, isPrimary: false)
+        XCTAssertNil(retrievedStore.data(forKey: "nuvio.tv.settings.layout.homeCatalogTitles"))
+        XCTAssertEqual(retrievedStore.string(forKey: "nuvio.tv.profile.settings.profileID"), profileId)
+    }
+
+    func testLargePayloadStoreMultiMegabyteCapacityWithoutTouchingUserDefaults() {
+        let testKey = "heavy-payload-\(UUID().uuidString)"
+        let directory = "stressTestSnapshots"
+        defer { LargePayloadStore.removeDirectory(directory) }
+
+        // Create a 5MB payload (which would crash UserDefaults cfprefsd)
+        let largeData = Data(repeating: 0x42, count: 5 * 1024 * 1024)
+        let writeSuccess = LargePayloadStore.write(largeData, key: testKey, directory: directory)
+        XCTAssertTrue(writeSuccess)
+
+        let readData = LargePayloadStore.read(key: testKey, directory: directory)
+        XCTAssertEqual(readData?.count, 5 * 1024 * 1024)
+        XCTAssertEqual(readData, largeData)
+
+        // Ensure standard UserDefaults has zero bytes of this test data
+        XCTAssertNil(UserDefaults.standard.data(forKey: testKey))
+    }
+
+    func testBingeGroupStoreAndStreamQualityStoresLRULimits() {
+        let profileId = "test-lru-\(UUID().uuidString)"
+
+        // Save 220 items (max is 200)
+        for i in 1...220 {
+            BingeGroupStore.save(
+                seriesId: "series_\(i)",
+                bingeGroup: "group_\(i)",
+                addonName: "Torrentio",
+                releaseFingerprint: "fp_\(i)",
+                resolution: 1080,
+                quality: .webDl,
+                isCached: true,
+                profileId: profileId
+            )
+        }
+
+        // The most recently saved item (series_220) must exist
+        let latest = BingeGroupStore.load(seriesId: "series_220", profileId: profileId)
+        XCTAssertNotNil(latest)
+        XCTAssertEqual(latest?.bingeGroup, "group_220")
+
+        // Oldest items (e.g. series_1 to series_20) should have been evicted by the 200-cap LRU
+        let evicted = BingeGroupStore.load(seriesId: "series_1", profileId: profileId)
+        XCTAssertNil(evicted)
     }
 }
 

@@ -33,6 +33,9 @@ struct BingeGroupRecord: Codable, Equatable {
 
 enum BingeGroupStore {
     private static let prefix = "nuvio.tv.bingeGroup."
+    private static let storageDirectoryName = "bingeGroups"
+    private static let maxEntries = 200
+    private static let lock = NSLock()
 
     static func save(
         seriesId: String,
@@ -70,10 +73,16 @@ enum BingeGroupStore {
             timestamp: Date()
         )
 
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        records[trimmedId] = record
+        persistRecords(records, profileId: profileId)
+
+        // Clear legacy UserDefaults key if present
         let store = defaults(for: profileId)
-        let key = prefix + trimmedId
-        guard let data = try? JSONEncoder().encode(record) else { return }
-        store.set(data, forKey: key)
+        store.removeObject(forKey: prefix + trimmedId)
     }
 
     static func save(
@@ -100,28 +109,104 @@ enum BingeGroupStore {
     static func load(seriesId: String, profileId: String? = nil) -> BingeGroupRecord? {
         let trimmedId = seriesId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedId.isEmpty else { return nil }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        let records = loadRecords(profileId: profileId)
+        if let record = records[trimmedId] {
+            return record
+        }
+
+        // Legacy fallback from UserDefaults
         let store = defaults(for: profileId)
         let key = prefix + trimmedId
-        guard let data = store.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(BingeGroupRecord.self, from: data)
+        if let data = store.data(forKey: key),
+           let record = try? JSONDecoder().decode(BingeGroupRecord.self, from: data) {
+            var updated = records
+            updated[trimmedId] = record
+            persistRecords(updated, profileId: profileId)
+            store.removeObject(forKey: key)
+            return record
+        }
+        return nil
     }
 
     static func remove(seriesId: String, profileId: String? = nil) {
         let trimmedId = seriesId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedId.isEmpty else { return }
+
+        lock.lock()
+        defer { lock.unlock() }
+
+        var records = loadRecords(profileId: profileId)
+        if records.removeValue(forKey: trimmedId) != nil {
+            persistRecords(records, profileId: profileId)
+        }
         let store = defaults(for: profileId)
         store.removeObject(forKey: prefix + trimmedId)
     }
 
     static func clearAll(profileId: String? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let key = storageKey(for: profileId)
+        LargePayloadStore.remove(key: key, directory: storageDirectoryName)
+
         let store = defaults(for: profileId)
-        for (key, _) in store.dictionaryRepresentation() where key.hasPrefix(prefix) {
-            store.removeObject(forKey: key)
+        for (k, _) in store.dictionaryRepresentation() where k.hasPrefix(prefix) {
+            store.removeObject(forKey: k)
         }
     }
 
     static func clear(profileId: String? = nil) {
         clearAll(profileId: profileId)
+    }
+
+    private static func storageKey(for profileId: String?) -> String {
+        let id = profileId ?? ProfileSettings.activeProfileID ?? "default"
+        return "bingeGroups.\(id)"
+    }
+
+    private static func loadRecords(profileId: String?) -> [String: BingeGroupRecord] {
+        let key = storageKey(for: profileId)
+        if let data = LargePayloadStore.read(key: key, directory: storageDirectoryName),
+           let decoded = try? JSONDecoder().decode([String: BingeGroupRecord].self, from: data) {
+            return decoded
+        }
+
+        // Migrate any legacy records found in UserDefaults
+        let store = defaults(for: profileId)
+        var migrated: [String: BingeGroupRecord] = [:]
+        for (k, _) in store.dictionaryRepresentation() where k.hasPrefix(prefix) {
+            let seriesId = String(k.dropFirst(prefix.count))
+            if let data = store.data(forKey: k),
+               let record = try? JSONDecoder().decode(BingeGroupRecord.self, from: data) {
+                migrated[seriesId] = record
+            }
+            store.removeObject(forKey: k)
+        }
+        if !migrated.isEmpty {
+            persistRecords(migrated, profileId: profileId)
+        }
+        return migrated
+    }
+
+    private static func persistRecords(_ records: [String: BingeGroupRecord], profileId: String?) {
+        let bounded = Dictionary(
+            uniqueKeysWithValues: records
+                .sorted { $0.value.timestamp > $1.value.timestamp }
+                .prefix(maxEntries)
+                .map { ($0.key, $0.value) }
+        )
+        let key = storageKey(for: profileId)
+        if bounded.isEmpty {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(bounded) else { return }
+        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {

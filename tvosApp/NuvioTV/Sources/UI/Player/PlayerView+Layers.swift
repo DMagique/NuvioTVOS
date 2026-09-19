@@ -341,8 +341,13 @@ extension PlayerView {
                     skipSegmentFocused = false
                     requestedControlFocus = .timeline
                 case .right:
-                    skipSegmentFocused = false
-                    requestedControlFocus = .pip
+                    if viewModel.showNextEpisodeCard {
+                        skipSegmentFocused = false
+                        focusNextEpisode()
+                    } else {
+                        skipSegmentFocused = false
+                        requestedControlFocus = .pip
+                    }
                 default:
                     break
                 }
@@ -374,8 +379,13 @@ extension PlayerView {
                     guard !isWakingFromBackground else { return }
                     switch direction {
                     case .down:
-                        nextEpisodeFocused = false
-                        requestedControlFocus = .settings
+                        if autoPlayNextEnabled && !viewModel.isAutoPlayCancelled && !viewModel.isAdvancingEpisode {
+                            nextEpisodeFocused = false
+                            cancelAutoPlayFocused = true
+                        } else {
+                            nextEpisodeFocused = false
+                            requestedControlFocus = .settings
+                        }
                     case .left:
                         if viewModel.showSkipSegmentCard {
                             nextEpisodeFocused = false
@@ -404,6 +414,11 @@ extension PlayerView {
                         case .down:
                             cancelAutoPlayFocused = false
                             requestedControlFocus = .settings
+                        case .left:
+                            if viewModel.showSkipSegmentCard {
+                                cancelAutoPlayFocused = false
+                                focusSkipSegment()
+                            }
                         default:
                             break
                         }

@@ -238,11 +238,11 @@ final class IntroDBSkipService {
                 let spread = cluster.map { let p = anchor($0); return abs(p.0 - med.0) + abs(p.1 - med.1) }.max() ?? .infinity
                 return (cluster, spread, med)
             }
-            let cluster = candidates.sorted {
+            guard let cluster = candidates.sorted(by: {
                 if $0.0.count != $1.0.count { return $0.0.count > $1.0.count }
                 if $0.1 != $1.1 { return $0.1 < $1.1 }
                 return $0.2.0 != $1.2.0 ? $0.2.0 < $1.2.0 : $0.2.1 < $1.2.1
-            }.first!.0
+            }).first?.0 else { return nil }
             guard cluster.count >= 2 else { return nil }
             let points = cluster.map { anchor($0) }
             let start = median(points.map { $0.0 }), endValue = median(points.map { $0.1 })

@@ -1104,8 +1104,20 @@ struct TraktProgressService {
         }
     }
 
+    private static let checkpointDirectoryName = "traktCheckpoints"
+
     private static func loadCheckpoints() -> [LocalPlaybackCheckpoint] {
-        guard let data = UserDefaults.standard.data(forKey: checkpointStorageKey),
+        let data: Data? = {
+            if let fileData = LargePayloadStore.read(key: checkpointStorageKey, directory: checkpointDirectoryName) {
+                return fileData
+            }
+            guard let legacy = UserDefaults.standard.data(forKey: checkpointStorageKey) else { return nil }
+            if LargePayloadStore.write(legacy, key: checkpointStorageKey, directory: checkpointDirectoryName) {
+                UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
+            }
+            return legacy
+        }()
+        guard let data,
               let decoded = try? checkpointDecoder().decode(
                   [LocalPlaybackCheckpoint].self,
                   from: data
@@ -1117,11 +1129,14 @@ struct TraktProgressService {
 
     private static func saveCheckpoints(_ checkpoints: [LocalPlaybackCheckpoint]) {
         guard !checkpoints.isEmpty else {
+            LargePayloadStore.remove(key: checkpointStorageKey, directory: checkpointDirectoryName)
             UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
             return
         }
         guard let data = try? checkpointEncoder().encode(checkpoints) else { return }
-        UserDefaults.standard.set(data, forKey: checkpointStorageKey)
+        if LargePayloadStore.write(data, key: checkpointStorageKey, directory: checkpointDirectoryName) {
+            UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
+        }
     }
 
     private static func checkpointEncoder() -> JSONEncoder {

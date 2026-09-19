@@ -192,7 +192,7 @@ class PlayerViewModel: ObservableObject {
     /// this many seconds before the end. When an ending skip exists, the card
     /// arms at the same moment as Skip Ending instead.
     private static let nextCardLeadSeconds: Double = 120
-    private static let nextEpisodeAutoHideSeconds = 5
+    private static let nextEpisodeAutoHideSeconds = 10
     /// Same lead-in used by skip-segment detection so both cards arm together.
     private static let skipSegmentStartLead: Double = 0.35
 
@@ -212,6 +212,7 @@ class PlayerViewModel: ObservableObject {
     @Published private(set) var isPlaybackDebugEnabled = false
     @Published private(set) var trailerDiagnostics: String?
     @Published private(set) var trailerQualityLabel: String?
+    @Published private(set) var hasRenderedFirstFrame = false
     private var playbackDebugHUDBackend: PlayerEngineKind?
     private var didShowPlaybackDebugHUDForStream = false
 
@@ -290,9 +291,11 @@ class PlayerViewModel: ObservableObject {
     private var dismissedSkipIntervalIds: Set<String> = []
     private var skipSegmentAutoHideDeadline: Date?
     private var skipIntervalLoadTask: Task<Void, Never>?
+    private var sourcesFetchTask: Task<Void, Never>?
+    private var sourcesLoadGeneration: UInt64 = 0
     private var didSeedIntroDBSeasonTemplate = false
     private var didRefreshIntroDBForKnownDuration = false
-    private static let skipSegmentAutoHideSeconds = 5
+    private static let skipSegmentAutoHideSeconds = 10
     private var seekRepeatTimer: Timer?
     private var seekHoldStartDate: Date?
     private var seekHoldDirection: Double = 1.0
@@ -352,8 +355,8 @@ class PlayerViewModel: ObservableObject {
     /// expires or a source fails. `excludedURLs` are links already tried this
     /// session so failover never loops a dead source. Nil disables recovery.
     var reloadCurrentStream: ((_ episode: NuvioVideo?, _ excludedURLs: [String]) async -> PreparedNextStream?)?
-    /// Lists playable sources for a content id (Sources panel).
-    var fetchPlaybackSources: ((_ contentId: String, _ type: String) async -> [NuvioStream])?
+    /// Streams playable sources into the Sources panel as add-ons respond.
+    var fetchPlaybackSources: ((_ contentId: String, _ type: String) -> AsyncStream<[NuvioStream]>)?
     /// Resolves a user-picked source into a ready stream (debrid + URL).
     var resolvePlaybackStream: ((
         _ stream: NuvioStream,
@@ -442,8 +445,21 @@ class PlayerViewModel: ObservableObject {
                 self.playbackDidSuspend(positionMs: positionMs, durationMs: durationMs)
             }
         }
+        let firstFrame: () -> Void = { [weak self, weak coordinator] in
+            Task { @MainActor [weak self, weak coordinator] in
+                guard let self, let coordinator,
+                      self.sessionCoordinator === coordinator,
+                      coordinator.loadGeneration == generation else { return }
+                if !self.hasRenderedFirstFrame {
+                    self.hasRenderedFirstFrame = true
+                }
+                self.tick()
+            }
+        }
         playerController.onPlaybackSuspended = suspend
+        playerController.onFirstFrameReady = firstFrame
         aetherController?.onPlaybackSuspended = suspend
+        aetherController?.onFirstFrameReady = firstFrame
         aetherController?.subtitleTranslationState.onFirstOutcome = { [weak self] outcome in
             self?.handleAISubtitleTranslationOutcome(outcome)
         }
@@ -516,7 +532,8 @@ class PlayerViewModel: ObservableObject {
         provider: String? = nil,
         filename: String? = nil,
         videoSize: Int64? = nil,
-        trickplayURL: URL? = nil
+        trickplayURL: URL? = nil,
+        currentEpisode: NuvioVideo? = nil
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
         // Keep this session-level flag authoritative for tracking decisions.
@@ -553,7 +570,8 @@ class PlayerViewModel: ObservableObject {
                 // The retained Aether clock is authoritative on PiP restore;
                 // the original launch resume would seek the adopted session
                 // backward during the first tick.
-                resumeFrom: nil
+                resumeFrom: nil,
+                currentEpisode: currentEpisode
             )
             tick()
             startPolling()
@@ -566,7 +584,8 @@ class PlayerViewModel: ObservableObject {
             subtitle: subtitle,
             httpHeaders: httpHeaders,
             externalSubtitles: externalSubtitles,
-            resumeFrom: resumeFrom
+            resumeFrom: resumeFrom,
+            currentEpisode: currentEpisode
         )
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -617,7 +636,8 @@ class PlayerViewModel: ObservableObject {
                         ),
                         assMode: .strip,
                         streamName: title.isEmpty ? nil : title,
-                        streamDescription: PlaybackMarkers.trailerSubtitle
+                        streamDescription: PlaybackMarkers.trailerSubtitle,
+                        artworkURL: self.resolveArtworkURL(for: meta, episode: nil, isTrailer: true)
                     )
                     self.sessionCoordinator.load(request)
                     self.activeEngineKind = self.sessionCoordinator.activeBackend
@@ -667,7 +687,8 @@ class PlayerViewModel: ObservableObject {
         httpHeaders: [String: String] = [:],
         streamName: String?,
         streamDescription: String?,
-        filename: String?
+        filename: String?,
+        artworkURL: URL? = nil
     ) {
         let frameRateMode = ProfileSettings.current.string(forKey: SettingsKey.frameRateMatching) ?? "Always"
         let matchContent = frameRateMode.caseInsensitiveCompare("Off") != .orderedSame
@@ -681,6 +702,7 @@ class PlayerViewModel: ObservableObject {
             duration: expectedDurationSeconds,
             fallbackURL: url.absoluteString
         )
+        let resolvedArtwork = artworkURL ?? resolveArtworkURL(for: activeMeta, episode: currentEpisodeVideo, isTrailer: isTrailerPlaybackSession)
         let request = PlaybackLoadRequest(
             videoURL: url,
             audioURL: nil,
@@ -705,7 +727,8 @@ class PlayerViewModel: ObservableObject {
             streamDescription: streamDescription,
             filename: filename,
             canonicalMediaKey: canonicalKey,
-            trickplayURL: activeTrickplayURL
+            trickplayURL: activeTrickplayURL,
+            artworkURL: resolvedArtwork
         )
         sessionCoordinator.load(
             request,
@@ -782,6 +805,34 @@ class PlayerViewModel: ObservableObject {
         return false
     }
 
+    /// Resolves the remote artwork URL for Now Playing identity card.
+    /// Prefers the episode thumbnail for series episodes, falling back to show backdrop/poster.
+    /// Prefers movie poster, falling back to movie backdrop for movies.
+    func resolveArtworkURL(for meta: NuvioMeta?, episode: NuvioVideo?, isTrailer: Bool) -> URL? {
+        guard let meta else { return nil }
+        if !isTrailer, let thumb = episode?.thumbnail?.trimmingCharacters(in: .whitespacesAndNewlines), !thumb.isEmpty {
+            if let url = URL(string: thumb) {
+                return url
+            }
+        }
+        if meta.isSeries {
+            if let background = meta.backgroundUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !background.isEmpty, let url = URL(string: background) {
+                return url
+            }
+            if let poster = meta.posterUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !poster.isEmpty, let url = URL(string: poster) {
+                return url
+            }
+        } else {
+            if let poster = meta.posterUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !poster.isEmpty, let url = URL(string: poster) {
+                return url
+            }
+            if let background = meta.backgroundUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !background.isEmpty, let url = URL(string: background) {
+                return url
+            }
+        }
+        return nil
+    }
+
     /// Applies all per-stream state for a title/episode. Shared by the initial
     /// `load` and the in-place `replaceStream` used for a seamless next-episode
     /// advance, so both paths reset resume/track/subtitle state identically.
@@ -792,6 +843,7 @@ class PlayerViewModel: ObservableObject {
         httpHeaders: [String: String] = [:],
         externalSubtitles: [NuvioSubtitle],
         resumeFrom: Double?,
+        currentEpisode: NuvioVideo? = nil,
         preserveSessionPreferences: Bool = false
     ) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
@@ -842,6 +894,9 @@ class PlayerViewModel: ObservableObject {
         self.pendingSeekDelta = 0
         self.hidePeek()
         self.activeMeta = meta
+        if let currentEpisode {
+            self.currentEpisodeVideo = currentEpisode
+        }
         self.activeStreamURL = url.absoluteString
         self.activeHTTPHeaders = httpHeaders
         if !isTrailerPlayback {
@@ -857,6 +912,11 @@ class PlayerViewModel: ObservableObject {
             ? nil
             : Self.episodeNumbers(fromSubtitle: subtitle)
                 ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
+        if currentEpisodeVideo == nil, !isTrailerPlayback, meta.isSeries, let numbers = self.activeEpisodeNumbers {
+            self.currentEpisodeVideo = meta.videos?.first(where: { $0.season == numbers.season && $0.episode == numbers.episode })
+        } else if !meta.isSeries {
+            self.currentEpisodeVideo = nil
+        }
         let selectionKey = isTrailerPlayback
             ? nil
             : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
@@ -879,6 +939,7 @@ class PlayerViewModel: ObservableObject {
         self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
         self.replacementStreamHits = 0
+        self.hasRenderedFirstFrame = false
         // The full list stays browsable in the subtitle panel; only smart-matched
         // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
         self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
@@ -1254,6 +1315,15 @@ class PlayerViewModel: ObservableObject {
         nextEpisodeAutoPlayDeadline = nil
     }
 
+    func dismissNextEpisodeCard(cancelAutoPlay: Bool = true) {
+        if cancelAutoPlay {
+            self.cancelAutoPlay()
+        }
+        autoHiddenNextEpisodeCard = true
+        showNextEpisodeCard = false
+        nextEpisodeAutoHideDeadline = nil
+    }
+
     private func advance() {
         guard !isAdvanceInFlight,
               let next = nextEpisode,
@@ -1310,6 +1380,7 @@ class PlayerViewModel: ObservableObject {
     /// link reload, which resumes from `resumeFrom`).
     private func replaceStream(prepared: PreparedNextStream, episode: NuvioVideo?, resumeFrom: Double?) {
         guard let meta = activeMeta else { return }
+        cancelSourcesFetch()
         applyStreamState(
             url: prepared.url,
             meta: meta,
@@ -1317,6 +1388,7 @@ class PlayerViewModel: ObservableObject {
             httpHeaders: prepared.httpHeaders,
             externalSubtitles: prepared.subtitles,
             resumeFrom: resumeFrom,
+            currentEpisode: episode ?? currentEpisodeVideo,
             preserveSessionPreferences: true
         )
         self.activeAddonName = prepared.addonName
@@ -1347,7 +1419,8 @@ class PlayerViewModel: ObservableObject {
             httpHeaders: prepared.httpHeaders,
             streamName: prepared.streamName,
             streamDescription: prepared.streamDescription ?? prepared.subtitleLine,
-            filename: prepared.filename
+            filename: prepared.filename,
+            artworkURL: prepared.artworkURL
         )
         videoNaturalSize = .zero
         if pollTimer == nil { startPolling() }
@@ -1962,6 +2035,12 @@ class PlayerViewModel: ObservableObject {
             markLoadStarted()
         }
 
+        if c.hasFirstFrameReadyForDisplay || (c.isPlayerPlaying && !c.isPlayerLoading && (c.videoFrameSize != .zero || c.durationMs > 0)) {
+            if !hasRenderedFirstFrame {
+                hasRenderedFirstFrame = true
+            }
+        }
+
         // A stream that was just handed to the engine hasn't opened yet, so the
         // idle pipeline reads as paused. Keep reporting `.buffering` until it
         // really starts, so a source/episode switch shows the spinner over the
@@ -2132,6 +2211,7 @@ class PlayerViewModel: ObservableObject {
         isAwaitingStreamStart = false
         sidePanel = nil
         availableSources = []
+        cancelSourcesFetch()
         pendingSeekDelta = 0
         playerToast = nil
         isSwitchingSource = false
@@ -2246,6 +2326,15 @@ class PlayerViewModel: ObservableObject {
         seek(to: min(interval.endTime + 0.25, max(time.duration - 0.5, interval.endTime)))
         showControls = false
         scheduleControlsHide()
+    }
+
+    func dismissActiveInterval() {
+        guard let interval = activeSkipInterval else { return }
+        dismissedSkipIntervalIds.insert(interval.id)
+        autoHiddenSkipIntervalId = interval.id
+        skipSegmentCountdown = nil
+        skipSegmentAutoHideDeadline = nil
+        activeSkipInterval = nil
     }
 
     func skipForward() {
@@ -2393,10 +2482,30 @@ class PlayerViewModel: ObservableObject {
         clock.duration > 0 ? clock.duration : time.duration
     }
 
-    private var secondsPerPoint: Double {
-        let duration = playbackDuration
-        guard duration > 0 else { return 0.5 }
-        return max(duration / 3200, 0.35)
+    /// Computes velocity-aware scrub delta seconds from a pan movement increment.
+    /// Provides frame-accurate second-by-second precision for gentle pans while
+    /// dynamically accelerating during faster swipes and flicks.
+    private func scrubDeltaSeconds(for inc: CGFloat, duration: Double) -> Double {
+        let absInc = abs(Double(inc))
+        guard absInc > 0.0001 else { return 0 }
+        let sign = inc >= 0 ? 1.0 : -1.0
+
+        let baseRate = 0.08
+        let durationFactor = duration > 0 ? max(0.8, min(sqrt(duration / 3600.0), 1.8)) : 1.0
+
+        let speed = absInc
+        let speedMultiplier: Double
+        if speed <= 2.5 {
+            speedMultiplier = 1.0
+        } else if speed <= 8.0 {
+            let t = (speed - 2.5) / 5.5
+            speedMultiplier = 1.0 + t * 1.5 * durationFactor
+        } else {
+            let t = min((speed - 8.0) / 12.0, 1.0)
+            speedMultiplier = (2.5 + t * 3.5) * durationFactor
+        }
+
+        return sign * absInc * baseRate * speedMultiplier
     }
 
     private func suppressMoveBriefly() {
@@ -2728,6 +2837,7 @@ class PlayerViewModel: ObservableObject {
                 // beginScrub dismisses the pause sheet if it was up.
                 beginScrub()
                 touchIntent = .scrub
+                scrubLastDx = dx
                 scrubPanPoints(dx: dx)
             }
         }
@@ -2743,7 +2853,9 @@ class PlayerViewModel: ObservableObject {
         scrubLastDx = dx
         guard let target = scrubValue, !wheelEngaged else { return }
         let duration = playbackDuration
-        let proposed = target + Double(inc) * secondsPerPoint
+        let delta = scrubDeltaSeconds(for: inc, duration: duration)
+        guard abs(delta) > 0.0001 else { return }
+        let proposed = target + delta
         let clamped = max(0, min(proposed, duration > 0 ? duration - 1 : proposed))
         publishScrub(clamped)
         restartScrubTimeout()
@@ -3714,14 +3826,33 @@ class PlayerViewModel: ObservableObject {
         guard let fetchPlaybackSources,
               let contentId = panelSourceContentId else { return }
         guard force || availableSources.isEmpty, !isLoadingSources else { return }
+        sourcesFetchTask?.cancel()
+        sourcesLoadGeneration &+= 1
+        let generation = sourcesLoadGeneration
         isLoadingSources = true
         let type = panelSourceContentType
-        Task { @MainActor [weak self] in
+        let updates = fetchPlaybackSources(contentId, type)
+        sourcesFetchTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let streams = await fetchPlaybackSources(contentId, type)
-            self.availableSources = streams
-            self.isLoadingSources = false
+            defer {
+                if self.sourcesLoadGeneration == generation {
+                    self.sourcesFetchTask = nil
+                    self.isLoadingSources = false
+                }
+            }
+            for await streams in updates {
+                guard !Task.isCancelled,
+                      self.sourcesLoadGeneration == generation else { return }
+                self.availableSources = streams
+            }
         }
+    }
+
+    private func cancelSourcesFetch() {
+        sourcesLoadGeneration &+= 1
+        sourcesFetchTask?.cancel()
+        sourcesFetchTask = nil
+        isLoadingSources = false
     }
 
     func isCurrentSource(_ stream: NuvioStream) -> Bool {

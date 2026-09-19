@@ -21,6 +21,10 @@ enum TVHomeLayout {
     static let stripVerticalPadding: CGFloat = 24
     /// Section title line (~30pt) + VStack spacing under the title (~10pt) + slack.
     static let rowTitleBlock: CGFloat = 56
+    /// The focused section title now lives in the fixed hero instead of the
+    /// scrolling row.
+    /// Keep the hero's added block equal to the space removed from each row.
+    static let heroSectionTitleBlock: CGFloat = 56
 
     /// Horizontal strip motion preserving momentum across continuous remote presses.
     static let scrollAnimation = Animation.interactiveSpring(response: 0.24, dampingFraction: 0.86, blendDuration: 0.18)
@@ -124,8 +128,7 @@ struct TVLoadingCatalogRow: View {
     var showAddonName: Bool = true
     var horizontalEdgeInset: CGFloat = 0
     var onFocus: (() -> Void)? = nil
-    var onMoveUp: (() -> Void)? = nil
-    var onMoveDown: (() -> Void)? = nil
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
 
     @FocusState private var focusedPlaceholderIndex: Int?
     @State private var scrollIndex: Int = 0
@@ -195,10 +198,7 @@ struct TVLoadingCatalogRow: View {
                     .focusable(true)
                     .focused($focusedPlaceholderIndex, equals: index)
                     .accessibilityLabel("\(title), loading")
-                    .modifier(OptionalMoveCommandHandler(handler: (onMoveUp != nil || onMoveDown != nil) ? { direction in
-                        if direction == .up { onMoveUp?() }
-                        else if direction == .down { onMoveDown?() }
-                    } : nil))
+                    .modifier(OptionalMoveCommandHandler(handler: onMove))
                 }
             }
             .padding(.vertical, TVHomeLayout.stripVerticalPadding)
@@ -238,6 +238,7 @@ struct TVLoadingCatalogRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .focusSection()
         .defaultFocusIfAvailable($focusedPlaceholderIndex, 0)
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
     }
 }
 
@@ -257,6 +258,9 @@ struct TVCatalogRow: View {
     let title: String
     var addonName: String? = nil
     var showAddonName: Bool = true
+    /// Grid View still owns its headings; Modern Home moves catalog headings
+    /// into the fixed hero so poster rows can start at the clipping boundary.
+    var showsSectionTitle: Bool = true
     let horizontalEdgeInset: CGFloat
     let items: [NuvioMeta]
     var progressByItemId: [String: ContinueWatchingItem] = [:]
@@ -270,8 +274,6 @@ struct TVCatalogRow: View {
     var restrictFocusToCardKey: String? = nil
     var retainFocusAppearanceForCardKey: String? = nil
     var suppressFocusAnimations: Bool = false
-    var isFastScrolling: Bool = false
-    var isRowFocused: Bool = false
     let onInitialFocusRequested: () -> Void
     let onFocus: (NuvioMeta) -> Void
     let onBlur: (NuvioMeta) -> Void
@@ -282,8 +284,7 @@ struct TVCatalogRow: View {
     var onPlayContinueWatchingManually: ((ContinueWatchingItem) -> Void)? = nil
     var onStartContinueWatchingFromBeginning: ((ContinueWatchingItem) -> Void)? = nil
     var onRemoveFromContinueWatching: ((ContinueWatchingItem) -> Void)? = nil
-    var onMoveUp: (() -> Void)? = nil
-    var onMoveDown: (() -> Void)? = nil
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
 
     @State private var scrollIndex: Int?
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
@@ -350,7 +351,13 @@ struct TVCatalogRow: View {
         guard item.isSeries else {
             return titleWatched
         }
-        return titleWatched ? true : nil
+        if titleWatched {
+            return true
+        }
+        if !WatchedStore.hasWatchedAnyEpisodes(for: item) {
+            return false
+        }
+        return nil
     }
 
     private var defaultFocusCardKey: String? {
@@ -366,36 +373,43 @@ struct TVCatalogRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 14) {
-                Text(title)
-                    .font(.custom("Inter-Bold", size: 30))
-                    .foregroundColor(.white)
+        Group {
+            if showsSectionTitle {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .center, spacing: 14) {
+                        Text(title)
+                            .font(.custom("Inter-Bold", size: 30))
+                            .foregroundColor(.white)
 
-                if showAddonName, let addonName = addonName, !addonName.isEmpty {
-                    Text(addonName)
-                        .font(.custom("Inter-SemiBold", size: 16))
-                        .foregroundColor(SettingsAccent.color(for: theme))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(SettingsAccent.color(for: theme).opacity(0.18), in: Capsule())
-                        .overlay(
-                            Capsule()
-                                .strokeBorder(SettingsAccent.color(for: theme).opacity(0.35), lineWidth: 1)
-                        )
+                        if showAddonName, let addonName = addonName, !addonName.isEmpty {
+                            Text(addonName)
+                                .font(.custom("Inter-SemiBold", size: 16))
+                                .foregroundColor(SettingsAccent.color(for: theme))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(SettingsAccent.color(for: theme).opacity(0.18), in: Capsule())
+                                .overlay(
+                                    Capsule()
+                                        .strokeBorder(SettingsAccent.color(for: theme).opacity(0.35), lineWidth: 1)
+                                )
+                        }
+                    }
+                    .padding(.leading, TVLayout.rowLeading)
+                    .offset(y: 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .zIndex(1)
+
+                    cardStrip
+                        .zIndex(0)
                 }
+            } else {
+                cardStrip
             }
-            .padding(.leading, TVLayout.rowLeading)
-            .offset(y: 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .zIndex(1)
-
-            cardStrip
-                .zIndex(0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .focusSection()
         .defaultFocusIfAvailable(externalFocus, defaultFocusCardKey)
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
     }
 
     private var cardStrip: some View {
@@ -408,7 +422,7 @@ struct TVCatalogRow: View {
         let rowSmoothFocus = smoothFocus
         let rowFocusHighlighter = focusHighlighter
         let rowFastNavigation = fastNavigation
-        let rowCardFocusAnimations = rowSmoothFocus && !suppressFocusAnimations && !isFastScrolling && !rowFastNavigation
+        let rowCardFocusAnimations = rowSmoothFocus && !suppressFocusAnimations && !rowFastNavigation
         let rowTileShape = rowTileShape
         let rowPosterWidth: CGFloat = TVCollectionFolderCardLayout.cardWidth(shape: rowTileShape, layoutMode: rowHomeLayout)
         let rowCardSpacing: CGFloat = rowHomeLayout == "Compact" ? 22 : 28
@@ -445,7 +459,9 @@ struct TVCatalogRow: View {
                         }
                     }
                     onFocus(focused)
-                    onApproachEnd(focused)
+                    if !suppressFocusAnimations {
+                        onApproachEnd(focused)
+                    }
                     let approachStarted = TVHomeDebugTrace.now()
                     TVHomeDebugTrace.log(
                         "focus.approach row=\(id) index=\(itemIndex) "
@@ -494,10 +510,7 @@ struct TVCatalogRow: View {
                     focusHighlighterEnabled: rowFocusHighlighter,
                     retainFocusAppearance: retainFocusAppearanceForCardKey == cardKey,
                     allowsFocus: true,
-                    onMove: (onMoveUp != nil || onMoveDown != nil) ? { direction in
-                        if direction == .up { onMoveUp?() }
-                        else if direction == .down { onMoveDown?() }
-                    } : nil,
+                    onMove: onMove,
                     isWatched: isWatched(item)
                 ) {
                     onSelect(item)
@@ -550,33 +563,55 @@ struct TVCatalogRow: View {
 
 extension TVCatalogRow: Equatable {
     static func == (lhs: TVCatalogRow, rhs: TVCatalogRow) -> Bool {
+        guard lhs.id == rhs.id,
+              lhs.initialScrollIndex == rhs.initialScrollIndex,
+              lhs.landscapeFocusedId == rhs.landscapeFocusedId,
+              lhs.suppressFocusAnimations == rhs.suppressFocusAnimations,
+              lhs.horizontalEdgeInset == rhs.horizontalEdgeInset,
+              lhs.title == rhs.title,
+              lhs.addonName == rhs.addonName,
+              lhs.showAddonName == rhs.showAddonName,
+              lhs.showsSectionTitle == rhs.showsSectionTitle,
+              lhs.explicitTileShape == rhs.explicitTileShape,
+              lhs.initialFocusCardKey == rhs.initialFocusCardKey,
+              lhs.items.count == rhs.items.count,
+              lhs.progressByItemId.count == rhs.progressByItemId.count
+        else {
+            return false
+        }
+
         let lhsTargetInRow = lhs.restrictFocusToCardKey?.hasPrefix("\(lhs.id)\u{1}") == true
         let rhsTargetInRow = rhs.restrictFocusToCardKey?.hasPrefix("\(rhs.id)\u{1}") == true
-        let restrictEqual = (lhs.restrictFocusToCardKey != nil) == (rhs.restrictFocusToCardKey != nil)
-            && (lhsTargetInRow == rhsTargetInRow)
-            && (!lhsTargetInRow || lhs.restrictFocusToCardKey == rhs.restrictFocusToCardKey)
+        guard (lhs.restrictFocusToCardKey != nil) == (rhs.restrictFocusToCardKey != nil),
+              lhsTargetInRow == rhsTargetInRow,
+              !lhsTargetInRow || lhs.restrictFocusToCardKey == rhs.restrictFocusToCardKey
+        else {
+            return false
+        }
 
         let lhsRetainInRow = lhs.retainFocusAppearanceForCardKey?.hasPrefix("\(lhs.id)\u{1}") == true
         let rhsRetainInRow = rhs.retainFocusAppearanceForCardKey?.hasPrefix("\(rhs.id)\u{1}") == true
-        let retainEqual = (lhsRetainInRow == rhsRetainInRow)
-            && (!lhsRetainInRow || lhs.retainFocusAppearanceForCardKey == rhs.retainFocusAppearanceForCardKey)
+        guard (lhsRetainInRow == rhsRetainInRow),
+              !lhsRetainInRow || lhs.retainFocusAppearanceForCardKey == rhs.retainFocusAppearanceForCardKey
+        else {
+            return false
+        }
 
-        return lhs.id == rhs.id
-            && lhs.title == rhs.title
-            && lhs.addonName == rhs.addonName
-            && lhs.showAddonName == rhs.showAddonName
-            && lhs.horizontalEdgeInset == rhs.horizontalEdgeInset
-            && lhs.items == rhs.items
-            && lhs.progressByItemId == rhs.progressByItemId
-            && lhs.watchedTitleKeys == rhs.watchedTitleKeys
-            && lhs.initialScrollIndex == rhs.initialScrollIndex
-            && lhs.initialFocusCardKey == rhs.initialFocusCardKey
-            && lhs.landscapeFocusedId == rhs.landscapeFocusedId
-            && lhs.explicitTileShape == rhs.explicitTileShape
-            && restrictEqual
-            && retainEqual
-            && lhs.suppressFocusAnimations == rhs.suppressFocusAnimations
-            && lhs.isFastScrolling == rhs.isFastScrolling
+        guard lhs.progressByItemId == rhs.progressByItemId,
+              lhs.watchedTitleKeys == rhs.watchedTitleKeys
+        else {
+            return false
+        }
+
+        // Fast item comparison without deep recursion into large nested video arrays
+        return lhs.items.elementsEqual(rhs.items, by: { a, b in
+            a.id == b.id
+                && a.name == b.name
+                && a.posterUrl == b.posterUrl
+                && a.backgroundUrl == b.backgroundUrl
+                && a.type == b.type
+                && a.posterShape == b.posterShape
+        })
     }
 }
 
@@ -606,7 +641,13 @@ enum TVHomeGridLayout {
         guard ["series", "tv", "show", "tvshow"].contains(type) else {
             return titleWatched
         }
-        return titleWatched ? true : nil
+        if titleWatched {
+            return true
+        }
+        if !WatchedStore.hasWatchedAnyEpisodes(for: item) {
+            return false
+        }
+        return nil
     }
 }
 
@@ -959,6 +1000,9 @@ enum TVCollectionFolderCardLayout {
 struct TVCollectionFolderRow: View {
     let id: String
     let title: String
+    /// Grid View still owns its headings; Modern Home moves collection row
+    /// headings into the folder hero for the same clean clipping boundary.
+    var showsSectionTitle: Bool = true
     let horizontalEdgeInset: CGFloat
     let folders: [TVCollectionFolderItem]
     let initialScrollIndex: Int
@@ -968,13 +1012,10 @@ struct TVCollectionFolderRow: View {
     var restrictFocusToCardKey: String? = nil
     var retainFocusAppearanceForCardKey: String? = nil
     var suppressFocusAnimations = false
-    var isFastScrolling: Bool = false
-    var isRowFocused = false
     let onInitialFocusRequested: () -> Void
     let onFocus: (TVCollectionFolderItem) -> Void
     let onSelect: (TVCollectionFolderItem) -> Void
-    var onMoveUp: (() -> Void)? = nil
-    var onMoveDown: (() -> Void)? = nil
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
 
     @State private var scrollIndex: Int?
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
@@ -1061,21 +1102,28 @@ struct TVCollectionFolderRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(title)
-                .font(.custom("Inter-Bold", size: 30))
-                .foregroundColor(.white)
-                .padding(.leading, TVLayout.rowLeading)
-                .offset(y: 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .zIndex(2)
+        Group {
+            if showsSectionTitle {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(title)
+                        .font(.custom("Inter-Bold", size: 30))
+                        .foregroundColor(.white)
+                        .padding(.leading, TVLayout.rowLeading)
+                        .offset(y: 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .zIndex(2)
 
-            cardStrip
-                .zIndex(0)
+                    cardStrip
+                        .zIndex(0)
+                }
+            } else {
+                cardStrip
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .focusSection()
         .defaultFocusIfAvailable(externalFocus, defaultFocusFolderKey)
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
     }
 
     private var cardStrip: some View {
@@ -1116,14 +1164,11 @@ struct TVCollectionFolderRow: View {
                     },
                     layoutMode: rowHomeLayout,
                     showPosterLabels: rowPosterLabels,
-                    smoothFocusAnimations: rowSmoothFocus && !isFastScrolling && !fastNavigation,
+                    smoothFocusAnimations: rowSmoothFocus && !fastNavigation,
                     focusHighlighterEnabled: rowFocusHighlighter,
                     retainFocusAppearance: retainFocusAppearanceForCardKey == cardKey,
                     allowsFocus: true,
-                    onMove: (onMoveUp != nil || onMoveDown != nil) ? { direction in
-                        if direction == .up { onMoveUp?() }
-                        else if direction == .down { onMoveDown?() }
-                    } : nil,
+                    onMove: onMove,
                     onSelect: { onSelect(folder) }
                 )
                 .disabled(
@@ -1158,26 +1203,35 @@ struct TVCollectionFolderRow: View {
 
 extension TVCollectionFolderRow: Equatable {
     static func == (lhs: TVCollectionFolderRow, rhs: TVCollectionFolderRow) -> Bool {
+        guard lhs.id == rhs.id,
+              lhs.initialScrollIndex == rhs.initialScrollIndex,
+              lhs.suppressFocusAnimations == rhs.suppressFocusAnimations,
+              lhs.horizontalEdgeInset == rhs.horizontalEdgeInset,
+              lhs.title == rhs.title,
+              lhs.showsSectionTitle == rhs.showsSectionTitle,
+              lhs.initialFocusCardKey == rhs.initialFocusCardKey,
+              lhs.folders.count == rhs.folders.count
+        else {
+            return false
+        }
+
         let lhsRestrictInRow = lhs.restrictFocusToCardKey?.hasPrefix("\(lhs.id)\u{1}") == true
         let rhsRestrictInRow = rhs.restrictFocusToCardKey?.hasPrefix("\(rhs.id)\u{1}") == true
-        let restrictEqual = (lhsRestrictInRow == rhsRestrictInRow)
-            && (!lhsRestrictInRow || lhs.restrictFocusToCardKey == rhs.restrictFocusToCardKey)
+        guard (lhsRestrictInRow == rhsRestrictInRow),
+              !lhsRestrictInRow || lhs.restrictFocusToCardKey == rhs.restrictFocusToCardKey
+        else {
+            return false
+        }
 
         let lhsRetainInRow = lhs.retainFocusAppearanceForCardKey?.hasPrefix("\(lhs.id)\u{1}") == true
         let rhsRetainInRow = rhs.retainFocusAppearanceForCardKey?.hasPrefix("\(rhs.id)\u{1}") == true
-        let retainEqual = (lhsRetainInRow == rhsRetainInRow)
-            && (!lhsRetainInRow || lhs.retainFocusAppearanceForCardKey == rhs.retainFocusAppearanceForCardKey)
+        guard (lhsRetainInRow == rhsRetainInRow),
+              !lhsRetainInRow || lhs.retainFocusAppearanceForCardKey == rhs.retainFocusAppearanceForCardKey
+        else {
+            return false
+        }
 
-        return lhs.id == rhs.id
-            && lhs.title == rhs.title
-            && lhs.horizontalEdgeInset == rhs.horizontalEdgeInset
-            && lhs.folders == rhs.folders
-            && lhs.initialScrollIndex == rhs.initialScrollIndex
-            && lhs.initialFocusCardKey == rhs.initialFocusCardKey
-            && restrictEqual
-            && retainEqual
-            && lhs.suppressFocusAnimations == rhs.suppressFocusAnimations
-            && lhs.isFastScrolling == rhs.isFastScrolling
+        return lhs.folders == rhs.folders
     }
 }
 
@@ -1211,9 +1265,9 @@ struct TVCollectionFolderCard: View {
         TVCollectionFolderCardLayout.cardHeight(layoutMode: layoutMode)
     }
 
-    /// Focusable surface stays aligned to standard portrait column width so
-    /// navigating vertically onto a portrait row targets the directly aligned card
-    /// instead of shifting rightwards to column 1.
+    /// Keep the focusable surface aligned with the standard portrait column
+    /// when a landscape folder is displayed. The artwork remains landscape,
+    /// but tvOS should use the leading edge for vertical row matching.
     private var layoutWidth: CGFloat {
         folder.tileShape == .landscape ? (layoutMode == "Compact" ? 170 : 210) : cardWidth
     }
@@ -1283,33 +1337,35 @@ struct TVCollectionFolderCard: View {
     }
 
     var body: some View {
-        Button(action: onSelect) {
-            cardContent
-        }
-        .buttonStyle(PosterCardButtonStyle())
-        .disabled(!allowsFocus)
-        .focused($isFocused)
-        .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? folder.id))
-        .focusEffectDisabledIfAvailable()
-        .modifier(OptionalMoveCommandHandler(handler: onMove))
-        .onChange(of: isFocused) { _, focused in
-            if focused { onFocus?() }
-        }
-        .onAppear {
-            guard shouldRequestInitialFocus, !didRequestInitialFocus else { return }
-            didRequestInitialFocus = true
-            onInitialFocusRequested?()
-            DispatchQueue.main.async {
-                isFocused = true
+        ZStack(alignment: .topLeading) {
+            Button(action: onSelect) {
+                cardContent
             }
+            .buttonStyle(PosterCardButtonStyle())
+            .disabled(!allowsFocus)
+            .focused($isFocused)
+            .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? folder.id))
+            .focusEffectDisabledIfAvailable()
+            .modifier(OptionalMoveCommandHandler(handler: onMove))
+            .onChange(of: isFocused) { _, focused in
+                if focused { onFocus?() }
+            }
+            .onAppear {
+                guard shouldRequestInitialFocus, !didRequestInitialFocus else { return }
+                didRequestInitialFocus = true
+                onInitialFocusRequested?()
+                DispatchQueue.main.async {
+                    isFocused = true
+                }
+            }
+            .frame(width: layoutWidth, height: totalCardHeight, alignment: .topLeading)
         }
-        .frame(width: layoutWidth, height: totalCardHeight, alignment: .topLeading)
         .frame(width: cardWidth, height: totalCardHeight, alignment: .topLeading)
         .zIndex(showFocus ? 1 : 0)
     }
 
     private var cardContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 9) {
             artTile
 
             if showPosterLabels && !folder.hideTitle {

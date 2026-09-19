@@ -121,8 +121,13 @@ enum WatchProgressLedger {
         if cachedKey == key, let cachedRecords {
             return cachedRecords
         }
-        guard let data = storedData(forKey: key),
-              let decoded = try? JSONDecoder().decode([WatchProgressRecord].self, from: data) else {
+        guard let data = storedData(forKey: key) else {
+            cachedRecords = []
+            cachedKey = key
+            return []
+        }
+        guard let decoded = try? JSONDecoder().decode([WatchProgressRecord].self, from: data) else {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
             cachedRecords = []
             cachedKey = key
             return []

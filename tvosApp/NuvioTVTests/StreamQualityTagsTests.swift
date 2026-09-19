@@ -1082,5 +1082,85 @@ final class StreamQualityTagsTests: XCTestCase {
         let loadedAfterClear = BingeGroupStore.load(seriesId: seriesId, profileId: profile1)
         XCTAssertNil(loadedAfterClear)
     }
+
+    // MARK: - StreamBadgeSettingsStore Persistence & Migration Tests
+
+    func testStreamBadgeSettingsStoreSavesToLargePayloadStoreAndNotUserDefaults() {
+        let testProfile = "test_badge_profile_\(UUID().uuidString)"
+        defer {
+            StreamBadgeSettingsStore.removeRules(for: testProfile)
+        }
+
+        var filter4K = StreamBadgeFilter()
+        filter4K.id = "4k"
+        filter4K.name = "4K"
+        filter4K.pattern = "4k|2160p"
+        filter4K.isEnabled = true
+
+        let rules = StreamBadgeRules(
+            imports: [
+                StreamBadgeImport(
+                    sourceUrl: "https://example.com/test_pack.json",
+                    filters: [filter4K],
+                    isActive: true
+                )
+            ]
+        )
+
+        StreamBadgeSettingsStore.saveRules(rules, for: testProfile)
+
+        // 1. UserDefaults must NOT contain the rules
+        let store = ProfileSettings.store(for: testProfile)
+        XCTAssertNil(store.object(forKey: SettingsKey.streamBadgeRules), "Badge rules must not be written to UserDefaults")
+
+        // 2. Raw JSON must be retrievable from LargePayloadStore
+        let raw = StreamBadgeSettingsStore.rawRulesJSON(for: testProfile)
+        XCTAssertNotNil(raw)
+        XCTAssertTrue(raw?.contains("test_pack.json") == true)
+        XCTAssertTrue(raw?.contains("4k|2160p") == true)
+
+        // 3. Remove rules cleans up file storage
+        StreamBadgeSettingsStore.removeRules(for: testProfile)
+        XCTAssertNil(StreamBadgeSettingsStore.rawRulesJSON(for: testProfile))
+    }
+
+    func testStreamBadgeSettingsStoreMigratesLegacyUserDefaults() {
+        let testProfile = "test_legacy_badge_\(UUID().uuidString)"
+        let store = ProfileSettings.store(for: testProfile)
+        defer {
+            StreamBadgeSettingsStore.removeRules(for: testProfile)
+            store.removeObject(forKey: SettingsKey.streamBadgeRules)
+        }
+
+        var filterDV = StreamBadgeFilter()
+        filterDV.id = "dv"
+        filterDV.name = "Dolby Vision"
+        filterDV.pattern = "dv|dovi"
+        filterDV.isEnabled = true
+
+        let rules = StreamBadgeRules(
+            imports: [
+                StreamBadgeImport(
+                    sourceUrl: "https://example.com/legacy_pack.json",
+                    filters: [filterDV],
+                    isActive: true
+                )
+            ]
+        )
+        let legacyData = try! JSONEncoder().encode(rules)
+        let legacyString = String(data: legacyData, encoding: .utf8)!
+
+        // Simulate legacy state: rules stored directly in UserDefaults
+        store.set(legacyString, forKey: SettingsKey.streamBadgeRules)
+        XCTAssertNotNil(store.string(forKey: SettingsKey.streamBadgeRules))
+
+        // Access rawRulesJSON or snapshot - must trigger migration
+        let migratedJSON = StreamBadgeSettingsStore.rawRulesJSON(for: testProfile)
+        XCTAssertNotNil(migratedJSON)
+        XCTAssertTrue(migratedJSON?.contains("legacy_pack.json") == true)
+
+        // Legacy UserDefaults key must now be deleted to free up cfprefsd quota
+        XCTAssertNil(store.object(forKey: SettingsKey.streamBadgeRules), "Legacy key in UserDefaults must be removed upon migration")
+    }
 }
 

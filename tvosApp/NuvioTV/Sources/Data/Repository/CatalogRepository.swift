@@ -1227,6 +1227,21 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     func streamsProgressively(id: String, type: String) -> AsyncStream<[NuvioStream]> {
+        streamsProgressively(
+            id: id,
+            type: type,
+            finishAfterStreamResults: false
+        )
+    }
+
+    /// Source pickers do not need to wait for the shared discovery job's
+    /// subtitle decoration phase. They can consume the stream list as each
+    /// add-on responds and finish once every stream group has settled.
+    func streamsProgressively(
+        id: String,
+        type: String,
+        finishAfterStreamResults: Bool
+    ) -> AsyncStream<[NuvioStream]> {
         // Bridge shared discovery into a progressive flat list for callers that
         // still observe AsyncStream. Observation cancel must NOT cancel the
         // shared job (returning from playback reuses it).
@@ -1262,7 +1277,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                             lastLoading = snapshot.isAnyLoading
                             continuation.yield(streams)
                         }
-                        if !snapshot.isAnyLoading {
+                        let streamResultsResolved = snapshot.hasResolvedTargets
+                            && !snapshot.groups.contains(where: \.isLoading)
+                        if (finishAfterStreamResults && streamResultsResolved) || !snapshot.isAnyLoading {
                             break
                         }
                     }

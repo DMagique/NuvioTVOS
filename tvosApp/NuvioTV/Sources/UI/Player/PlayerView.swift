@@ -46,8 +46,8 @@ struct PlayerView: View {
     /// The first argument is the episode currently playing; `excludedURLs` are
     /// sources already tried this session. Nil disables failover.
     var reloadCurrentStream: ((_ episode: NuvioVideo?, _ excludedURLs: [String]) async -> PreparedNextStream?)? = nil
-    /// Lists alternate streams for the Sources side panel.
-    var fetchPlaybackSources: ((_ contentId: String, _ type: String) async -> [NuvioStream])? = nil
+    /// Streams alternate sources into the Sources side panel as add-ons respond.
+    var fetchPlaybackSources: ((_ contentId: String, _ type: String) -> AsyncStream<[NuvioStream]>)? = nil
     /// Resolves a user-selected source for mid-playback switching.
     var resolvePlaybackStream: ((
         _ stream: NuvioStream,

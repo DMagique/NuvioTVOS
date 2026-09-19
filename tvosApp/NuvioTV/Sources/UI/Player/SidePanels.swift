@@ -261,6 +261,7 @@ struct PlayerSourcesPanel: View {
     @ObservedObject var viewModel: PlayerViewModel
     @FocusState private var focusedID: String?
     @State private var visibleSourceLimit: Int = 20
+    @State private var didSeedSourceFocus = false
 
     private var targetSourceId: String? {
         if let current = viewModel.availableSources.first(where: { viewModel.isCurrentSource($0) }) {
@@ -379,17 +380,24 @@ struct PlayerSourcesPanel: View {
                 }
                 .focusSection()
                 .onAppear {
+                    didSeedSourceFocus = false
                     viewModel.loadSourcesIfNeeded()
-                    ensureTargetSourceVisible()
-                    scrollToTarget(proxy: proxy)
+                    seedSourceFocus(proxy: proxy)
                 }
                 .onChange(of: viewModel.availableSources.map(\.id)) { _, sourceIDs in
                     guard !sourceIDs.isEmpty else { return }
-                    ensureTargetSourceVisible()
-                    scrollToTarget(proxy: proxy)
+                    seedSourceFocus(proxy: proxy)
                 }
             }
         }
+    }
+
+    private func seedSourceFocus(proxy: ScrollViewProxy) {
+        guard !didSeedSourceFocus else { return }
+        ensureTargetSourceVisible()
+        guard targetSourceId != nil else { return }
+        didSeedSourceFocus = true
+        scrollToTarget(proxy: proxy)
     }
 
     private func scrollToTarget(proxy: ScrollViewProxy) {

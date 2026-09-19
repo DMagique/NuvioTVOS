@@ -321,6 +321,93 @@ final class CatalogDecodingTests: XCTestCase {
         XCTAssertEqual(sources[1].mediaType, "tv")
     }
 
+    func testAsianFilmAndSeriesCollectionTemplateDecoding() throws {
+        let json = """
+        {
+          "id": "asian-collection-1",
+          "title": "Asian Film & Series",
+          "templateID": "asian-film-series",
+          "templateVersion": 1,
+          "viewMode": "ROWS",
+          "folders": [
+            {
+              "id": "kisskh-folder",
+              "title": "KissKH",
+              "coverEmoji": "💋",
+              "sources": [
+                {
+                  "provider": "addon",
+                  "addonId": "kisskh",
+                  "type": "series",
+                  "catalogId": "kisskh-drama",
+                  "title": "KissKH • Asian Dramas"
+                },
+                {
+                  "provider": "tmdb",
+                  "tmdbSourceType": "DISCOVER",
+                  "title": "K-Drama • Popular",
+                  "mediaType": "tv",
+                  "sortBy": "popularity.desc",
+                  "filters": {
+                    "withOriginalLanguage": "ko"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "mkv-folder",
+              "title": "MKV Asian Hub",
+              "coverEmoji": "🎬",
+              "sources": [
+                {
+                  "provider": "addon",
+                  "addonId": "mkv",
+                  "type": "movie",
+                  "catalogId": "mkv-movies",
+                  "title": "MKV • Movies"
+                }
+              ]
+            },
+            {
+              "id": "ott-folder",
+              "title": "Asian OTT & Streaming",
+              "coverEmoji": "📺",
+              "sources": [
+                {
+                  "provider": "tmdb",
+                  "tmdbSourceType": "DISCOVER",
+                  "title": "Viki • Popular Series",
+                  "mediaType": "tv",
+                  "sortBy": "popularity.desc",
+                  "filters": {
+                    "withWatchProviders": "344",
+                    "watchRegion": "US"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let collection = try decoder.decode(NuvioCollection.self, from: Data(json.utf8))
+        XCTAssertEqual(collection.title, "Asian Film & Series")
+        XCTAssertEqual(collection.folders.count, 3)
+
+        let kisskhSources = collection.folders[0].resolvedSources
+        XCTAssertEqual(kisskhSources.count, 2)
+        XCTAssertEqual(kisskhSources[0].normalizedProvider, "addon")
+        XCTAssertEqual(kisskhSources[0].addonId, "kisskh")
+        XCTAssertEqual(kisskhSources[1].normalizedProvider, "tmdb")
+        XCTAssertEqual(kisskhSources[1].filters?.withOriginalLanguage, "ko")
+
+        let mkvSources = collection.folders[1].resolvedSources
+        XCTAssertEqual(mkvSources.first?.addonId, "mkv")
+
+        let ottSources = collection.folders[2].resolvedSources
+        XCTAssertEqual(ottSources.first?.filters?.withWatchProviders, "344")
+    }
+
     func testCollectionFolderPromotesLegacyAddonCatalogSources() throws {
         let json = """
         {

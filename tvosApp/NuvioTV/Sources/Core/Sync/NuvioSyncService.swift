@@ -2032,21 +2032,8 @@ enum PlayerSettingsSyncMapper {
 
         if let translated = autoPlayModeFromWire(rawAutoPlayMode) {
             defaults.set(translated.useTopResult, forKey: SettingsKey.smartStreamUseTopResult)
-            if translated.smartSelection {
-                defaults.set(true, forKey: SettingsKey.smartStreamSelection)
-            } else {
-                let remoteHasExplicitSmartSelection: Bool = {
-                    if let raw = remote[smartStreamSelectionRemoteKey] {
-                        if let dict = raw as? [String: Any] {
-                            return (decodeValue(dict) as? Bool) ?? (dict["value"] as? Bool) ?? false
-                        }
-                        return (raw as? Bool) ?? false
-                    }
-                    return false
-                }()
-                if !remoteHasExplicitSmartSelection {
-                    defaults.set(false, forKey: SettingsKey.smartStreamSelection)
-                }
+            if remote[smartStreamSelectionRemoteKey] == nil {
+                defaults.set(translated.smartSelection, forKey: SettingsKey.smartStreamSelection)
             }
         } else if let rawTopResult = remote[smartStreamUseTopResultRemoteKey] {
             let useTop: Bool = {
@@ -3099,6 +3086,14 @@ fileprivate final class NuvioAPIClient {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+    private func executeWithConnectionRetry(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch let error as URLError where error.code == .networkConnectionLost {
+            return try await session.data(for: request)
+        }
+    }
+
     private func rest<T: Decodable>(
         _ path: String,
         session authSession: AuthSession
@@ -3115,7 +3110,7 @@ fileprivate final class NuvioAPIClient {
         request.setValue("Bearer \(authSession.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await executeWithConnectionRetry(request)
         guard let http = response as? HTTPURLResponse else {
             throw AuthError(message: "No response from server")
         }
@@ -3147,7 +3142,7 @@ fileprivate final class NuvioAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: params)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await executeWithConnectionRetry(request)
         guard let http = response as? HTTPURLResponse else {
             throw AuthError(message: "No response from server")
         }
@@ -3164,7 +3159,6 @@ fileprivate final class NuvioAPIClient {
     private func exportStreamBadgeSettings(localProfileId: String) -> [String: Any] {
         let defaults = ProfileSettings.store(for: localProfileId)
         let mappings: [(String, String)] = [
-            (SettingsKey.streamBadgeRules, "stream_badge_rules"),
             (SettingsKey.showFileSizeBadges, "show_file_size_badges"),
             (SettingsKey.showAddonLogo, "show_addon_logo"),
             (SettingsKey.streamBadgePlacement, "stream_badge_placement")
@@ -3175,6 +3169,10 @@ fileprivate final class NuvioAPIClient {
                   let encoded = Self.encodeSettingValue(value) else { continue }
             feature[remoteKey] = encoded
         }
+        if let rulesJSON = StreamBadgeSettingsStore.rawRulesJSON(for: localProfileId),
+           let encoded = Self.encodeSettingValue(rulesJSON) {
+            feature["stream_badge_rules"] = encoded
+        }
         return feature
     }
 
@@ -3182,7 +3180,6 @@ fileprivate final class NuvioAPIClient {
         guard let remote else { return }
         let defaults = ProfileSettings.store(for: localProfileId)
         let mappings: [(String, String)] = [
-            ("stream_badge_rules", SettingsKey.streamBadgeRules),
             ("show_file_size_badges", SettingsKey.showFileSizeBadges),
             ("show_addon_logo", SettingsKey.showAddonLogo),
             ("stream_badge_placement", SettingsKey.streamBadgePlacement)
@@ -3191,6 +3188,7 @@ fileprivate final class NuvioAPIClient {
         // Android's replaceFromSyncPayload clears the feature before applying
         // the remote values, so omitted optional values do not leave stale
         // settings from the previous profile/account behind.
+        defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
         mappings.forEach { _, localKey in
             defaults.removeObject(forKey: localKey)
         }
@@ -3204,7 +3202,19 @@ fileprivate final class NuvioAPIClient {
                 defaults.set(value, forKey: localKey)
             }
         }
-        StreamBadgeSettingsStore.postChanged()
+
+        // Stream badge rules are large JSON structures that must never be written
+        // to UserDefaults, otherwise cfprefsd triggers __CFPREFERENCES_HAS_DETECTED_THIS_APP_TRYING_TO_STORE_TOO_MUCH_DATA__.
+        let rawRules: String?
+        if let encoded = remote["stream_badge_rules"] as? [String: Any],
+           let value = Self.decodeSettingValue(encoded) as? String {
+            rawRules = value
+        } else if let value = remote["stream_badge_rules"] as? String {
+            rawRules = value
+        } else {
+            rawRules = nil
+        }
+        StreamBadgeSettingsStore.saveRawRulesJSON(rawRules, for: localProfileId)
     }
 
     private func exportSettings(localProfileId: String) -> [String: Any] {
@@ -3215,6 +3225,7 @@ fileprivate final class NuvioAPIClient {
             // or another TV disable account progress pulls everywhere.
             guard key != SettingsKey.accountSyncWatchState else { return }
             guard !SettingsKey.deviceLocal.contains(key) else { return }
+            guard key != SettingsKey.streamBadgeRules else { return }
             guard let value = defaults.object(forKey: key),
                   let encoded = Self.encodeSettingValue(value) else {
                 return
@@ -3229,26 +3240,12 @@ fileprivate final class NuvioAPIClient {
         SettingsKey.all.forEach { key in
             guard key != SettingsKey.accountSyncWatchState else { return }
             guard !SettingsKey.deviceLocal.contains(key) else { return }
+            guard key != SettingsKey.streamBadgeRules else { return }
             guard let encoded = remote[key] as? [String: Any],
                   let value = Self.decodeSettingValue(encoded) else {
                 return
             }
             defaults.set(value, forKey: key)
-        }
-
-        // Older clients sync only the legacy primary/secondary/tertiary keys.
-        // If such a payload supplies a primary value, make that legacy snapshot
-        // authoritative and clear omitted lower slots instead of retaining stale
-        // local choices that could make System unexpectedly filter languages.
-        if remote[SettingsKey.subtitleLanguages] == nil,
-           remote[SettingsKey.subtitleLanguage] != nil {
-            defaults.removeObject(forKey: SettingsKey.subtitleLanguages)
-            if remote[SettingsKey.subtitleLanguageSecondary] == nil {
-                defaults.set("None", forKey: SettingsKey.subtitleLanguageSecondary)
-            }
-            if remote[SettingsKey.subtitleLanguageTertiary] == nil {
-                defaults.set("None", forKey: SettingsKey.subtitleLanguageTertiary)
-            }
         }
     }
 

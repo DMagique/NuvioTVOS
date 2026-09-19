@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 @testable import NuvioTV
 
+@MainActor
 final class SimklAuthServiceTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
@@ -845,7 +846,7 @@ final class SimklAuthServiceTests: XCTestCase {
             profileScope: "profile-1"
         )
 
-        XCTAssertTrue(result, "a kitsu id is a valid Simkl identifier")
+        XCTAssertTrue(result, "a kitsu id is a valid Simkl identifier - diagnostic: \(SimklProgressService.scrobbleDiagnostic)")
         XCTAssertEqual(seenIDs?["kitsu"] as? Int, 1376)
     }
 
@@ -1488,7 +1489,8 @@ private final class SimklURLProtocolStub: URLProtocol {
     static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
 
     override class func canInit(with request: URLRequest) -> Bool {
-        true
+        guard let host = request.url?.host else { return false }
+        return host.contains("simkl.com")
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
