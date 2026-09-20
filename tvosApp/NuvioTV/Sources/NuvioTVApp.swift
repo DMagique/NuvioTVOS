@@ -295,6 +295,7 @@ struct ContentView: View {
     @State private var playbackEpisodes: [NuvioVideo] = []
     @State private var playbackCurrentEpisode: NuvioVideo?
     @State private var playbackOrigin: PlaybackOrigin = .main
+    @State private var playbackCacheFileIdentity: PlaybackCacheFileIdentity?
     @State private var playbackDidStart = false
     @State private var reopenStreamPickerOnDetails = false
     @State private var reopenStreamPickerEpisode: NuvioVideo?
@@ -1278,7 +1279,8 @@ struct ContentView: View {
         resumeFrom: Double?,
         httpHeaders: [String: String] = [:],
         origin: PlaybackOrigin = .main,
-        customPlayer: ExternalPlayer? = nil
+        customPlayer: ExternalPlayer? = nil,
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil
     ) {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
@@ -1359,7 +1361,8 @@ struct ContentView: View {
             httpHeaders: httpHeaders,
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
-            origin: origin
+            origin: origin,
+            cacheFileIdentity: cacheFileIdentity
         )
     }
 
@@ -1370,13 +1373,15 @@ struct ContentView: View {
         httpHeaders: [String: String],
         externalSubtitles: [NuvioSubtitle],
         resumeFrom: Double?,
-        origin: PlaybackOrigin
+        origin: PlaybackOrigin,
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil
     ) {
         if PictureInPictureManager.shared.isPictureInPictureActive,
            PictureInPictureManager.shared.activeContext?.url != url {
             PictureInPictureManager.shared.invalidateSession()
         }
         playbackOrigin = origin
+        playbackCacheFileIdentity = cacheFileIdentity
         playbackDidStart = false
         withAnimation(.easeInOut(duration: 0.28)) {
             activeScreen = .player(
@@ -1394,6 +1399,7 @@ struct ContentView: View {
         PictureInPictureManager.shared.onRestoreUI = { [self] context, completion in
             withAnimation(.easeInOut(duration: 0.24)) {
                 self.playbackOrigin = context.playbackOrigin
+                self.playbackCacheFileIdentity = context.cacheFileIdentity
                 self.playbackEpisodes = context.episodes
                 self.playbackCurrentEpisode = context.currentEpisode
                 self.activeScreen = .player(
@@ -1787,7 +1793,7 @@ struct ContentView: View {
                 reopenStreamPickerOnDetails = false
                 reopenStreamPickerEpisode = nil
             },
-            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player in
+            onPlayClick: { streamUrlString, httpHeaders, meta, subtitle, externalSubtitles, currentEpisode, episodes, player, cacheFileIdentity in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                     reopenStreamPickerOnDetails = false
@@ -1802,7 +1808,8 @@ struct ContentView: View {
                         resumeFrom: isTrailer ? nil : Self.resumePosition(for: meta, episode: currentEpisode),
                         httpHeaders: httpHeaders,
                         origin: .details,
-                        customPlayer: player
+                        customPlayer: player,
+                        cacheFileIdentity: cacheFileIdentity
                     )
                 }
             },
@@ -2030,6 +2037,7 @@ struct ContentView: View {
             )
             return PreparedNextStream(
                 url: url,
+                cacheFileIdentity: PlaybackCacheFileIdentity(infoHash: candidate.effectiveInfoHash, fileIndex: candidate.effectiveFileIdx),
                 httpHeaders: candidate.httpHeaders ?? [:],
                 subtitleLine: subtitleLine,
                 subtitles: candidate.subtitles,
@@ -2180,6 +2188,7 @@ struct ContentView: View {
         )
         return PreparedNextStream(
             url: url,
+                cacheFileIdentity: PlaybackCacheFileIdentity(infoHash: stream.effectiveInfoHash, fileIndex: stream.effectiveFileIdx),
             httpHeaders: stream.httpHeaders ?? [:],
             subtitleLine: subtitleLine,
             subtitles: stream.subtitles,
@@ -2277,6 +2286,7 @@ struct ContentView: View {
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
             playbackOrigin: playbackOrigin,
+            cacheFileIdentity: isTrailer ? nil : playbackCacheFileIdentity,
             episodes: isTrailer ? [] : playbackEpisodes,
             currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
             autoPlayNextEnabled: autoPlayNext,
@@ -5552,7 +5562,6 @@ struct TVHomeView: View {
     private func homeSkeletonSections(excluding published: Set<String>) -> [TVHomeSection] {
         let hiddenCatalogs = TVHomeCatalogOrder.disabledCatalogKeys()
         let hiddenCollections = TVHomeCatalogOrder.disabledCollectionIds()
-        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
 
         return TVHomeCatalogOrder.snapshotRows().compactMap { row in
             guard !published.contains(row.id),
@@ -5565,15 +5574,6 @@ struct TVHomeView: View {
             }
             if let settingsKey = row.settingsKey, hiddenCatalogs.contains(settingsKey) {
                 return nil
-            }
-            if let addonId = row.addonId, let type = row.contentType, let catalogId = row.catalogId {
-                let isDirectSource = collectionSources.contains { source in
-                    (source.addonIdentifier.caseInsensitiveCompare(addonId) == .orderedSame
-                     || source.addonIdentifier.contains(addonId))
-                        && source.contentType == type
-                        && source.catalogID == catalogId
-                }
-                if isDirectSource { return nil }
             }
             return TVHomeSection(
                 id: row.id,
@@ -6990,21 +6990,9 @@ enum TVHomeCatalogOrder {
     ) -> [SnapshotRow] {
         var rows = current
         var seen = Set(rows.map(\.id))
-        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
 
         for (index, previousRow) in previous.enumerated() {
             guard seen.insert(previousRow.id).inserted else { continue }
-            if let addonId = previousRow.addonId,
-               let type = previousRow.contentType,
-               let catalogId = previousRow.catalogId {
-                let isDirectSource = collectionSources.contains { source in
-                    (source.addonIdentifier.caseInsensitiveCompare(addonId) == .orderedSame
-                     || source.addonIdentifier.contains(addonId))
-                        && source.contentType == type
-                        && source.catalogID == catalogId
-                }
-                if isDirectSource { continue }
-            }
             rows.insert(previousRow, at: min(index, rows.count))
         }
         return rows
@@ -7234,35 +7222,8 @@ enum CatalogHomeVisibilityResolver {
         manifestURL: URL,
         explicitHomeKeys: Set<String>
     ) -> Bool {
-        let key = TVHomeCatalogOrder.catalogSettingsKey(
-            addonId: addonID, contentType: contentType, catalogId: catalogID
-        )
-        let matchingSources = collectionSources.filter {
-            matches($0.addonIdentifier, addonID: addonID, manifestURL: manifestURL)
-        }
-        guard !matchingSources.isEmpty else { return true }
-
-        let isDirectCollectionSource = matchingSources.contains {
-            $0.contentType == contentType && $0.catalogID == catalogID
-        }
-
-        // Direct collection sources are displayed inside their collection folder
-        // and must not be duplicated as individual Home rows.
-        if isDirectCollectionSource {
-            return false
-        }
-
-        // If this add-on has an active collection row on Home, that collection
-        // row is authoritative for the add-on. Other (generic/sibling) catalogs
-        // from the same add-on are only shown if explicitly represented in explicitHomeKeys.
-        let hasMatchingCollectionKey = matchingSources.contains {
-            !($0.collectionID.isEmpty)
-                && explicitHomeKeys.contains("collection_\($0.collectionID)")
-        }
-        if hasMatchingCollectionKey {
-            return explicitHomeKeys.contains(key)
-        }
-
+        // Matching Android TV: catalogs inside collection folders remain visible
+        // in layout and on Home unless explicitly disabled by user/account settings.
         return true
     }
 

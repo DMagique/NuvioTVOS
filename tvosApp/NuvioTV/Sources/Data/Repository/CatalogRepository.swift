@@ -447,14 +447,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
                         catalogId: spec.catalogId
                     )
                 ) else { continue }
-                guard CatalogHomeVisibilityResolver.shouldInclude(
-                    addonID: Self.cinemetaAddonId,
-                    contentType: spec.type,
-                    catalogID: spec.catalogId,
-                    collectionSources: collectionSources,
-                    manifestURL: baseURL.appendingPathComponent("manifest.json"),
-                    explicitHomeKeys: activeHomeKeys
-                ) else { continue }
                 cacheMetadata(page)
                 result.append(
                     NuvioCatalog(
@@ -593,15 +585,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
         var result: [NuvioCatalog] = []
 
-        if !disabledKeys.contains(movieKey),
-           CatalogHomeVisibilityResolver.shouldInclude(
-               addonID: "simkl",
-               contentType: "movie",
-               catalogID: "plantowatch",
-               collectionSources: sources,
-               manifestURL: URL(string: "https://simkl.com/manifest.json") ?? URL(fileURLWithPath: "/"),
-               explicitHomeKeys: activeKeys
-           ) {
+        if !disabledKeys.contains(movieKey) {
             let movieItems = await SimklLibraryService.fetchPlanToWatchItems(
                 type: "movie",
                 repository: self
@@ -631,15 +615,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             }
         }
 
-        if !disabledKeys.contains(seriesKey),
-           CatalogHomeVisibilityResolver.shouldInclude(
-               addonID: "simkl",
-               contentType: "series",
-               catalogID: "plantowatch",
-               collectionSources: sources,
-               manifestURL: URL(string: "https://simkl.com/manifest.json") ?? URL(fileURLWithPath: "/"),
-               explicitHomeKeys: activeKeys
-           ) {
+        if !disabledKeys.contains(seriesKey) {
             let seriesItems = await SimklLibraryService.fetchPlanToWatchItems(
                 type: "series",
                 repository: self
@@ -706,14 +682,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let eligible = (manifest.catalogs ?? []).filter { catalog in
                 guard catalog.eligibleForHome else { return false }
                 let key = "\(manifest.id)_\(catalog.type)_\(catalog.id)"
-                guard CatalogHomeVisibilityResolver.shouldInclude(
-                    addonID: manifest.id,
-                    contentType: catalog.type,
-                    catalogID: catalog.id,
-                    collectionSources: collectionSources,
-                    manifestURL: manifestURL,
-                    explicitHomeKeys: activeHomeKeys
-                ) else { return false }
                 guard !disabledCatalogKeys.contains(key) else {
                     return false
                 }

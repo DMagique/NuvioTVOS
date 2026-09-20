@@ -9425,18 +9425,8 @@ private struct AddonsSettingsSection: View {
         addonID: String,
         addonName: String
     ) -> [TVHomeCatalogOrder.SnapshotRow] {
-        let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
         let catalogs = (manifest.catalogs ?? []).filter { catalog in
             catalog.eligibleForHome
-                && CatalogHomeVisibilityResolver.shouldInclude(
-                    addonID: addonID,
-                    contentType: catalog.type ?? "",
-                    catalogID: catalog.id ?? "",
-                    collectionSources: collectionSources,
-                    manifestURL: manifestURL,
-                    explicitHomeKeys: activeHomeKeys
-                )
                 && (!catalog.requiresGenre || catalog.firstGenreOption != nil)
         }
         return catalogs.compactMap { catalog in
