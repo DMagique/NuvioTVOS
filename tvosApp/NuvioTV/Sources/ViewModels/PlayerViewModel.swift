@@ -236,6 +236,7 @@ class PlayerViewModel: ObservableObject {
     private var activeAddonName: String?
     private var activeProviderName: String?
     private var activeFilename: String?
+    private var activeCacheFileIdentity: PlaybackCacheFileIdentity?
     private var activeVideoSize: Int64?
     private var livePlaybackHasStarted = false
     private var liveBufferingBeganAt: Date?
@@ -337,6 +338,8 @@ class PlayerViewModel: ObservableObject {
     private var lastNudgeAt: Date?
     private var nudgeStreak = 0
     private var didConfigureWheelTracking = false
+    private var diskCachedBufferedPosition: Double = 0
+    private var diskCachePollTask: Task<Void, Never>?
 
     /// Best estimate of the real title's length, captured at load time from the
     /// existing Continue Watching entry (most reliable) or the metadata runtime.
@@ -532,6 +535,7 @@ class PlayerViewModel: ObservableObject {
         provider: String? = nil,
         filename: String? = nil,
         videoSize: Int64? = nil,
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         trickplayURL: URL? = nil,
         currentEpisode: NuvioVideo? = nil
     ) {
@@ -546,6 +550,7 @@ class PlayerViewModel: ObservableObject {
         activeProviderName = provider
         activeFilename = filename
         activeVideoSize = videoSize
+        activeCacheFileIdentity = cacheFileIdentity
         activeTrickplayURL = trickplayURL
         if !hasLoaded { sessionTrackSelection = nil }
 
@@ -556,6 +561,9 @@ class PlayerViewModel: ObservableObject {
            pipManager.isPictureInPictureActive
             || pipManager.isRestoringUIInProgress
             || sessionCoordinator === activeCoord {
+            if cacheFileIdentity == nil {
+                activeCacheFileIdentity = pipManager.activeContext?.cacheFileIdentity
+            }
             self.sessionCoordinator = activeCoord
             bindSessionCoordinatorCallbacks()
             self.activeEngineKind = activeCoord.activeBackend
@@ -665,6 +673,7 @@ class PlayerViewModel: ObservableObject {
                 meta: meta,
                 subtitle: subtitle,
                 httpHeaders: httpHeaders,
+                cacheFileIdentity: activeCacheFileIdentity,
                 externalSubtitles: externalSubtitles,
                 resumeFrom: resumeFrom,
                 episodes: seriesEpisodes,
@@ -688,6 +697,7 @@ class PlayerViewModel: ObservableObject {
         streamName: String?,
         streamDescription: String?,
         filename: String?,
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         artworkURL: URL? = nil
     ) {
         let frameRateMode = ProfileSettings.current.string(forKey: SettingsKey.frameRateMatching) ?? "Always"
@@ -727,6 +737,7 @@ class PlayerViewModel: ObservableObject {
             streamDescription: streamDescription,
             filename: filename,
             canonicalMediaKey: canonicalKey,
+            cacheFileIdentity: cacheFileIdentity ?? activeCacheFileIdentity,
             trickplayURL: activeTrickplayURL,
             artworkURL: resolvedArtwork
         )
@@ -889,6 +900,9 @@ class PlayerViewModel: ObservableObject {
         self.clock.position = 0
         self.clock.duration = 0
         self.clock.buffered = 0
+        self.diskCachedBufferedPosition = 0
+        self.diskCachePollTask?.cancel()
+        self.diskCachePollTask = nil
         self.clock.scrubTarget = nil
         self.resetScrubSession()
         self.pendingSeekDelta = 0
@@ -1050,6 +1064,7 @@ class PlayerViewModel: ObservableObject {
                 meta: meta,
                 subtitle: subtitle,
                 httpHeaders: activeHTTPHeaders,
+                cacheFileIdentity: activeCacheFileIdentity,
                 externalSubtitles: pendingExternalSubtitles,
                 resumeFrom: pendingResumeSeconds,
                 episodes: episodes,
@@ -1395,6 +1410,10 @@ class PlayerViewModel: ObservableObject {
         self.activeProviderName = prepared.provider
         self.activeFilename = prepared.filename
         self.activeVideoSize = prepared.videoSize
+        // A replacement without an explicitly proven identity must not inherit
+        // the previous file's cache namespace. Next-episode resolvers may supply
+        // a new identity on the prepared stream.
+        self.activeCacheFileIdentity = prepared.cacheFileIdentity
         if let bg = prepared.bingeGroup, !bg.isEmpty {
             self.activeBingeGroup = bg
         }
@@ -1420,6 +1439,7 @@ class PlayerViewModel: ObservableObject {
             streamName: prepared.streamName,
             streamDescription: prepared.streamDescription ?? prepared.subtitleLine,
             filename: prepared.filename,
+            cacheFileIdentity: prepared.cacheFileIdentity,
             artworkURL: prepared.artworkURL
         )
         videoNaturalSize = .zero
@@ -1863,8 +1883,27 @@ class PlayerViewModel: ObservableObject {
             // the coarser `time` publication is throttled by the settings panel.
             if clock.position != latestTime.current { clock.position = latestTime.current }
             if clock.duration != latestTime.duration { clock.duration = latestTime.duration }
-            let bufferedSeconds = Double(c.bufferedMs) / 1000.0
-            if clock.buffered != bufferedSeconds { clock.buffered = bufferedSeconds }
+            let engineBufferedSeconds = Double(c.bufferedMs) / 1000.0
+            let effectiveBuffered = max(engineBufferedSeconds, diskCachedBufferedPosition)
+            if clock.buffered != effectiveBuffered { clock.buffered = effectiveBuffered }
+
+            if diskCachePollTask == nil, latestTime.duration > 0 {
+                let currentPos = latestTime.current
+                let duration = latestTime.duration
+                diskCachePollTask = Task { @MainActor [weak self] in
+                    let forwardSec = await PlaybackStreamCacheManager.shared.contiguousCachedForwardSeconds(
+                        playheadSeconds: currentPos, totalDuration: duration
+                    )
+                    guard let self else { return }
+                    if forwardSec > 0 {
+                        self.diskCachedBufferedPosition = min(duration, currentPos + forwardSec)
+                    } else {
+                        self.diskCachedBufferedPosition = 0
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    self.diskCachePollTask = nil
+                }
+            }
         }
 
         // PlayerControls can focus the timeline before Aether has finished
@@ -2202,6 +2241,9 @@ class PlayerViewModel: ObservableObject {
         stopRepeatingSkip()
         cancelScrub()
         hidePeek()
+        diskCachePollTask?.cancel()
+        diskCachePollTask = nil
+        diskCachedBufferedPosition = 0
         seekDebounceTask?.cancel()
         loadWatchdogTask?.cancel()
         loadWatchdogTask = nil
@@ -2278,6 +2320,16 @@ class PlayerViewModel: ObservableObject {
             ? min(max(seconds, 0), max(duration - 0.25, 0))
             : max(seconds, 0)
         engine.seekToMs(Int64(target * 1000))
+        if let source = activeStreamURL.flatMap(URL.init(string:)) {
+            let generation = sessionCoordinator.loadGeneration
+            Task { @MainActor [weak self] in
+                guard let self, !self.didShutdown,
+                      self.sessionCoordinator.loadGeneration == generation else { return }
+                await PlaybackStreamCacheManager.shared.notifySeek(
+                    for: source, playheadSeconds: target, totalDuration: duration
+                )
+            }
+        }
         // Instant UI feedback while mpv catches up.
         clock.position = target
         var snapshot = time
@@ -3884,12 +3936,26 @@ class PlayerViewModel: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.isSwitchingSource = false }
-            guard let prepared = await resolvePlaybackStream(stream, contentId, subtitleLine) else {
+            guard var prepared = await resolvePlaybackStream(stream, contentId, subtitleLine) else {
                 self.showPlayerToast("Couldn't open this source")
                 self.isAwaitingStreamStart = false
                 self.status = .paused
                 return
             }
+            // The source resolver owns URL/debrid selection, while the source
+            // card owns the torrent file identity. A debrid/P2P resolver may
+            // choose a different file, so carry the identity only for a direct
+            // HTTP(S) stream whose explicit hash and file index survive
+            // normalization; otherwise replaceStream clears the prior one.
+            let isDirectHTTP = stream.directURL.flatMap(URL.init(string:))?.scheme
+                .map { $0.caseInsensitiveCompare("http") == .orderedSame || $0.caseInsensitiveCompare("https") == .orderedSame }
+                ?? false
+            prepared.cacheFileIdentity = isDirectHTTP
+                ? PlaybackCacheFileIdentity(
+                    infoHash: stream.effectiveInfoHash,
+                    fileIndex: stream.effectiveFileIdx
+                )
+                : nil
             self.failedStreamURLs.removeAll()
             let group = stream.bingeGroup ?? StreamQualityTags.syntheticBingeGroup(for: stream)
             if let group, !group.isEmpty {

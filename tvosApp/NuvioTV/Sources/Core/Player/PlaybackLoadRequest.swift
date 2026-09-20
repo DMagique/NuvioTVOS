@@ -1,6 +1,22 @@
 import Foundation
 import Darwin
 
+struct PlaybackCacheFileIdentity: Equatable, Sendable {
+    let infoHash: String
+    let fileIndex: Int
+
+    init?(infoHash: String?, fileIndex: Int?) {
+        guard let rawHash = infoHash, let fileIndex, fileIndex >= 0 else { return nil }
+        let hash = rawHash.lowercased()
+        guard (hash.count == 40 || hash.count == 64),
+              hash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        self.infoHash = hash
+        self.fileIndex = fileIndex
+    }
+
+    var cacheKey: String { "torrent:\(infoHash):\(fileIndex)" }
+}
+
 /// Everything required to open a stream on any playback backend.
 struct PlaybackLoadRequest: Equatable {
     var videoURL: URL
@@ -28,6 +44,7 @@ struct PlaybackLoadRequest: Equatable {
     /// Canonical content identity (SHA-256 over imdbId/season/ep/durationBucket)
     /// allowing preview caches to survive debrid URL changes and token expiration.
     var canonicalMediaKey: String?
+    var cacheFileIdentity: PlaybackCacheFileIdentity?
     /// Direct storyboard/trickplay manifest URL (WebVTT) when supplied by the stream add-on.
     var trickplayURL: URL?
     /// Remote artwork URL (episode thumbnail or movie poster/backdrop) for system Now Playing publication.
@@ -53,6 +70,7 @@ struct PlaybackLoadRequest: Equatable {
         streamDescription: String? = nil,
         filename: String? = nil,
         canonicalMediaKey: String? = nil,
+        cacheFileIdentity: PlaybackCacheFileIdentity? = nil,
         trickplayURL: URL? = nil,
         artworkURL: URL? = nil
     ) {
@@ -75,6 +93,7 @@ struct PlaybackLoadRequest: Equatable {
         self.streamDescription = streamDescription
         self.filename = filename
         self.canonicalMediaKey = canonicalMediaKey
+        self.cacheFileIdentity = cacheFileIdentity
         self.trickplayURL = trickplayURL
         self.artworkURL = artworkURL
     }

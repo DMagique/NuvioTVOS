@@ -40,6 +40,7 @@ extension PlayerView {
                     provider: provider,
                     filename: filename,
                     videoSize: videoSize,
+                    cacheFileIdentity: cacheFileIdentity,
                     trickplayURL: trickplayURL,
                     currentEpisode: currentEpisode
                 )
