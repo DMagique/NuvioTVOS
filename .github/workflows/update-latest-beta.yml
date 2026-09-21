@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   update-readme:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Check out the default branch
         uses: actions/checkout@v4
