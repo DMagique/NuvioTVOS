@@ -24,6 +24,31 @@ else
   exit 1
 fi
 
+# tvosApp/Project.swift pins MARKETING_VERSION (3.3.4) and CURRENT_PROJECT_VERSION
+# (65); upstream overrides them at build time for each release instead of
+# committing the bump, so a nightly would otherwise be stamped 3.3.4. Read the
+# newest release note this tree carries and build that version.
+RELEASE_VERSION="$(python3 - "$ROOT_DIR/release" <<'PY'
+import pathlib, re, sys
+
+best = ()
+for path in pathlib.Path(sys.argv[1]).glob("tvos-beta-*.md"):
+    match = re.fullmatch(r"tvos-beta-(\d+)\.(\d+)(?:\.(\d+))?", path.stem)
+    if match:
+        parts = tuple(int(value) for value in match.groups(default="0"))
+        best = max(best, parts)
+print(".".join(str(part) for part in best) if best else "")
+PY
+)"
+
+VERSION_OVERRIDE=()
+if [[ -n "$RELEASE_VERSION" ]]; then
+  VERSION_OVERRIDE+=("MARKETING_VERSION=$RELEASE_VERSION")
+  echo "==> Building app version ${RELEASE_VERSION} (from release notes)"
+else
+  echo "warning: no release/tvos-beta-*.md found; keeping the version pinned in tvosApp/Project.swift" >&2
+fi
+
 echo "==> Archiving ${TVOS_SCHEME} for tvOS (Release, unsigned)..."
 xcodebuild archive \
   -workspace "$TVOS_WORKSPACE" \
@@ -35,6 +60,7 @@ xcodebuild archive \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGN_ENTITLEMENTS="" \
+  "${VERSION_OVERRIDE[@]+"${VERSION_OVERRIDE[@]}"}" \
   -quiet
 
 APP_PATH="$ARCHIVE_DIR/Products/Applications/NuvioTV.app"
