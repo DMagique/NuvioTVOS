@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   close_stale:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - name: Close bug issues open longer than 30 days
         uses: actions/github-script@v7
