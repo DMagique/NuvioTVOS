@@ -73,9 +73,16 @@ actor TorrentSession {
             preferredFilename: filename
         )
         let magnetURI = buildMagnetURI(infoHash: infoHash, trackers: trackers)
-        try await session.begin(magnetURI: magnetURI, timeout: timeout)
-        let streamURL = try await session.startStreaming()
-        return (session, streamURL)
+        do {
+            try await session.begin(magnetURI: magnetURI, timeout: timeout)
+            let streamURL = try await session.startStreaming()
+            return (session, streamURL)
+        } catch {
+            // A failed start must not leave the engine `begin` started running:
+            // the caller can only stop a session it was actually handed.
+            await session.stop()
+            throw error
+        }
     }
 
     private func begin(magnetURI: String, timeout: TimeInterval) async throws {

@@ -60,7 +60,7 @@ jobs:
               "Policy check",
               "Scope boundaries",
               "Testing",
-              "Screenshots / Video",
+              "Screenshots / Video (UI changes only)",
               "Breaking changes",
               "Linked issues",
             ];
@@ -77,7 +77,7 @@ jobs:
 
               const cleaned = cleanedContent(name);
               const normalized = cleaned.toLowerCase();
-              const allowsNone = name === "Breaking changes" || name === "Screenshots / Video";
+              const allowsNone = name === "Breaking changes" || name === "Screenshots / Video (UI changes only)";
 
               if (
                 cleaned.length < 4 ||
@@ -127,7 +127,7 @@ jobs:
             const uiChanged = checkedLines(impactContent).some((line) =>
               /UI changed only to fix a documented glitch\/bug|UI change has explicit maintainer approval/i.test(line)
             );
-            const screenshotText = (cleanedContent("Screenshots / Video") || "").toLowerCase();
+            const screenshotText = (cleanedContent("Screenshots / Video (UI changes only)") || "").toLowerCase();
             if (uiChanged && ["none", "n/a", "na", "not a ui change", "not applicable"].includes(screenshotText)) {
               failedRules.push("UI changes must include before/after screenshots or video.");
             }

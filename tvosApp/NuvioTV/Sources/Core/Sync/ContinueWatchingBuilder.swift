@@ -323,6 +323,14 @@ enum ContinueWatchingBuilder {
             )
         }
 
+        // The per-entry metadata enrichment above suspends, and a rebuild
+        // scheduled after this one owns the static page state by then. Without
+        // this check a cancelled build resumed here and spliced its stale page
+        // into the newer one.
+        guard !Task.isCancelled, currentGeneration == generation,
+              profileId == WatchProgressLedger.activeProfileId else {
+            return PageResult(items: materialized, failedLookups: 0)
+        }
         consumedEntries += slice.count
         materialized = retainingUnwatched(materialized + page)
         TVHomeDebugTrace.log(

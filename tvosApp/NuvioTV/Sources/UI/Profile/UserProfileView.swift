@@ -137,6 +137,13 @@ public struct UserProfileView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: showingAddProfile)
+        .onChange(of: showingAddProfile) { _, isShowing in
+            // Leaving the sheet without saving must not keep the name/PIN for the next attempt.
+            guard !isShowing else { return }
+            newProfileName = ""
+            newProfilePin = ""
+            newProfileAvatarId = ProfileAvatarCatalog.defaultId
+        }
         .onAppear {
             AvatarCatalogStore.shared.loadIfNeeded()
             if accountSyncError != nil, onRetryAccountSync != nil {

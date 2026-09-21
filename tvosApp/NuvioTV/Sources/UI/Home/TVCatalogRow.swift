@@ -548,17 +548,6 @@ struct TVCatalogRow: View {
         }
         .frame(height: stripHeight)
     }
-
-    private func traceRowLayout(
-        enabled: Bool,
-        rowID: String,
-        itemCount: Int,
-        mountedCount: Int,
-        guideEntries: Int,
-        index: Int
-    ) {
-        TVHomeDebugTrace.log("row.layout row=\(rowID) items=\(itemCount) mounted=\(mountedCount) index=\(index)")
-    }
 }
 
 extension TVCatalogRow: Equatable {

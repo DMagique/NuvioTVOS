@@ -232,8 +232,14 @@ run_tvos_simulator() {
   xcrun simctl install "$simulator_id" "$simulator_app_path"
 
   echo "Launching tvOS app..."
-  xcrun simctl terminate "$simulator_id" "$TVOS_BUNDLE_ID" >/dev/null 2>&1 || true
-  xcrun simctl launch "$simulator_id" "$TVOS_BUNDLE_ID"
+
+  # tvosApp/Project.swift owns the bundle id; read it from the built app
+  # instead of assuming the (stale) value in TVOS_BUNDLE_ID.
+  local bundle_id
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$simulator_app_path/Info.plist" 2>/dev/null || echo "$TVOS_BUNDLE_ID")"
+
+  xcrun simctl terminate "$simulator_id" "$bundle_id" >/dev/null 2>&1 || true
+  xcrun simctl launch "$simulator_id" "$bundle_id"
 }
 
 main() {

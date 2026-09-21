@@ -101,7 +101,10 @@ struct PlayerView: View {
     func focusRemoteInput() {
         guard !viewModel.postPlayState.isVisible, viewModel.playbackStartupError == nil else { return }
         DispatchQueue.main.async {
-            guard viewModel.playbackStartupError == nil else { return }
+            // Re-check both guards: post-play can take over the remote in the
+            // runloop turn this hop crosses, and it owns focus when visible.
+            guard viewModel.playbackStartupError == nil,
+                  !viewModel.postPlayState.isVisible else { return }
             remoteInputFocused = true
         }
     }

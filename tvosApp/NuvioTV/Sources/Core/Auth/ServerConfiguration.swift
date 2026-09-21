@@ -144,7 +144,14 @@ enum ServerDiscoveryPolicy {
         var result: [String] = []
         if url.scheme?.lowercased() == "http" { result.append("HTTP is not encrypted; use HTTPS when possible.") }
         let host = url.host?.lowercased() ?? ""
-        let isPrivate = host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasPrefix("10.") || host.hasPrefix("192.168.") || host.hasPrefix("172.16.")
+        // RFC 1918 172.16.0.0/12 spans 172.16–172.31; the old prefix test only
+        // covered 172.16.x and flagged the rest as public.
+        let isPrivate172: Bool = {
+            let octets = host.split(separator: ".")
+            guard octets.count == 4, octets[0] == "172", let second = Int(octets[1]) else { return false }
+            return (16...31).contains(second)
+        }()
+        let isPrivate = host == "localhost" || host == "127.0.0.1" || host == "::1" || host.hasPrefix("10.") || host.hasPrefix("192.168.") || isPrivate172
         if !isPrivate && !host.hasSuffix(".nuvio.tv") { result.append("This host is public and has not been verified by Nuvio.") }
         return result
     }

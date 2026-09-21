@@ -4200,8 +4200,8 @@ enum CollectionsStore {
         for row in remote {
             guard let id = row["id"] as? String, !id.isEmpty else { continue }
             if intentionalDeletes.contains(id) { continue }
+            if byId[id] == nil { order.append(id) }
             byId[id] = row
-            order.append(id)
         }
         for row in local {
             guard let id = row["id"] as? String, !id.isEmpty else { continue }

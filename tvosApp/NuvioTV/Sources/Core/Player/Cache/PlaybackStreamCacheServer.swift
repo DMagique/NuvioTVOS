@@ -735,11 +735,16 @@ actor PlaybackStreamCacheServer {
                 isRangeRequest = true
                 let rangeVal = line.dropFirst("range:".count).trimmingCharacters(in: .whitespaces)
                 if rangeVal.hasPrefix("bytes=") {
-                    let specs = rangeVal.dropFirst("bytes=".count).split(separator: "-")
-                    if let firstStr = specs.first, let start = Int64(firstStr) {
+                    let spec = rangeVal.dropFirst("bytes=".count)
+                    let specs = spec.split(separator: "-", omittingEmptySubsequences: false)
+                    // A leading "-" is a suffix range: the final N bytes (RFC 9110 §14.1.2).
+                    let suffix = spec.hasPrefix("-") ? Int64(spec.dropFirst()) : nil
+                    if let suffix {
+                        requestedStart = max(0, fileLength - suffix)
+                    } else if let firstStr = specs.first, let start = Int64(firstStr) {
                         requestedStart = start
                     }
-                    if specs.count > 1, let secondStr = specs.last, let end = Int64(secondStr) {
+                    if suffix == nil, specs.count > 1, let secondStr = specs.last, !secondStr.isEmpty, let end = Int64(secondStr) {
                         requestedEnd = end
                     }
                 }

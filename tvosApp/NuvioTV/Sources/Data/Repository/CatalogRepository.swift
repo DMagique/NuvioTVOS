@@ -1463,8 +1463,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let fallbackKey = searchFallbackKey(for: item)
             let itemIdentifiers = SearchCanonicalIdentifiers(from: item)
 
-            // 1. Direct canonical identity match (highest priority)
-            let matchIndexByIdentity = identityKeys.compactMap { identityToIndex[$0] }.first
+            // 1. Direct canonical identity match (highest priority).
+            // `.min()`: Set order is unstable, the earliest match is not.
+            let matchIndexByIdentity = identityKeys.compactMap { identityToIndex[$0] }.min()
 
             // 2. Fallback content match (type:year:normalizedTitle) when identity keys are disjoint
             // across add-ons, provided canonical IDs don't conflict in the same namespace.
@@ -2667,7 +2668,7 @@ struct FlexibleString: Decodable {
         if let string = try? container.decode(String.self) {
             value = string
         } else if let double = try? container.decode(Double.self) {
-            value = double == double.rounded() ? String(Int(double)) : String(double)
+            value = Int(exactly: double).map(String.init) ?? String(double)
         } else {
             value = ""
         }

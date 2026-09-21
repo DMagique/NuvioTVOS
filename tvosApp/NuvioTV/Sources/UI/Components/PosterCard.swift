@@ -1839,7 +1839,7 @@ actor PosterArtworkCache {
                 // silently revalidate in the background to refresh rating badges without blocking UI.
                 if isVolatile && !stored.isFresh {
                     Task.detached(priority: .background) {
-                        guard let freshData = await downloadPosterData(url: url) else { return }
+                        guard let freshData = await downloadPosterData(url: url, revalidate: true) else { return }
                         await PosterDiskCache.shared.store(freshData, for: url)
                         if let freshImage = await PosterDecodeLimiter.shared.image(
                             from: freshData,

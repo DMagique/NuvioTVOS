@@ -142,8 +142,12 @@ struct DetailsScreen: View {
                     mdbListUserRating: viewModel.uiState.mdbListUserRating,
                     showMdbListRating: false,
                     onRateClick: { showingMdbListRating = true },
-                    onShareClick: { shareContent(viewModel.uiState.meta!) },
-                    onTrailerClick: { openTrailer(for: viewModel.uiState.meta!) },
+                    onShareClick: {
+                        if let meta = viewModel.uiState.meta { shareContent(meta) }
+                    },
+                    onTrailerClick: {
+                        if let meta = viewModel.uiState.meta { openTrailer(for: meta) }
+                    },
                     onOpenTitle: { contentId, contentType in
                         onOpenTitle?(contentId, contentType)
                     },
@@ -173,7 +177,9 @@ struct DetailsScreen: View {
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
                     onWatchedClick: { viewModel.toggleWatched() },
-                    onShareClick: { shareContent(viewModel.uiState.meta!) },
+                    onShareClick: {
+                        if let meta = viewModel.uiState.meta { shareContent(meta) }
+                    },
                     onBack: handleBack
                 )
                 #endif

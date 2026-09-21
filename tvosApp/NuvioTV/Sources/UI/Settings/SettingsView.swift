@@ -9941,8 +9941,11 @@ private struct HomeCatalogOrderSection: View {
 
     private func reload() {
         rows = layoutVisibleHomeCatalogRows()
+        // Snapshot rows come from persisted/synced JSON, which is not deduplicated
+        // on read: `uniqueKeysWithValues` traps on a repeated id. Keep the first.
         enabledByRowId = Dictionary(
-            uniqueKeysWithValues: rows.map { ($0.id, TVHomeCatalogOrder.isRowEnabled($0)) }
+            rows.map { ($0.id, TVHomeCatalogOrder.isRowEnabled($0)) },
+            uniquingKeysWith: { first, _ in first }
         )
     }
 

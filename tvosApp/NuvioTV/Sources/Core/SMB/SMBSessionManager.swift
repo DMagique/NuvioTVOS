@@ -102,6 +102,9 @@ final class SMBSessionManager: ObservableObject {
             browsers[server.id] = browser
             connectionStates[server.id] = .connected(shares: shares)
         } catch {
+            // `connect()` can succeed and `shares()` still fail; that browser
+            // never reaches `browsers`, so nothing else would close its session.
+            await browser.disconnect()
             connectionStates[server.id] = .failed(error.localizedDescription)
         }
     }

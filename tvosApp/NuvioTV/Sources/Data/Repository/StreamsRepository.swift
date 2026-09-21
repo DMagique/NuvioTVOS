@@ -59,7 +59,7 @@ final class StreamsRepository: ObservableObject {
     private func localStreamGroup(videoId: String) -> AddonStreamGroup? {
         let contentId = Self.baseContentId(from: videoId)
         let episode = Self.seasonEpisode(fromVideoId: videoId)
-        let servers = Dictionary(uniqueKeysWithValues: SMBServerStore.shared.servers.map { ($0.id, $0) })
+        let servers = Dictionary(SMBServerStore.shared.servers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let streams = SMBLibraryIndex.shared.files(
             forContentId: contentId,
             season: episode.season,
@@ -1053,9 +1053,9 @@ struct StreamAddonBehaviorHints: Decodable {
         if let num = try? container.decodeIfPresent(Int64.self, forKey: .videoSize) {
             self.videoSize = num
         } else if let dbl = try? container.decodeIfPresent(Double.self, forKey: .videoSize) {
-            self.videoSize = Int64(dbl)
+            self.videoSize = Int64(exactly: dbl.rounded(.towardZero))
         } else if let str = try? container.decodeIfPresent(String.self, forKey: .videoSize) {
-            self.videoSize = Int64(str) ?? Double(str).map(Int64.init)
+            self.videoSize = Int64(str) ?? Double(str).flatMap { Int64(exactly: $0.rounded(.towardZero)) }
         } else {
             self.videoSize = nil
         }

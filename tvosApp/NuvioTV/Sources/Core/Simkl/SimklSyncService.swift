@@ -1441,9 +1441,15 @@ struct SimklLibraryService {
         force: Bool = false
     ) async -> [LibraryStoreItem]? {
         guard TraktSettingsStore.librarySourceMode(in: store) == .simkl,
-              SimklRuntimeSession.authenticatedState(store: store) != nil,
-              let response = await SimklSyncLoader.libraryItems(store: store, force: force) else {
+              SimklRuntimeSession.authenticatedState(store: store) != nil else {
             return []
+        }
+        // A failed load must stay distinguishable from an account that is
+        // genuinely empty: callers keep the rows already on screen on `nil`,
+        // and replace them with the (empty) result otherwise. The Trakt and
+        // MDBList loaders report failure the same way.
+        guard let response = await SimklSyncLoader.libraryItems(store: store, force: force) else {
+            return nil
         }
 
         let seeds: [(String, SimklSyncItem)] =

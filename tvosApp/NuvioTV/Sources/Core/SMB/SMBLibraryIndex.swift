@@ -74,10 +74,9 @@ final class SMBLibraryIndex: ObservableObject {
 
     func files(forContentId contentId: String, season: Int?, episode: Int?) -> [SMBIndexedFile] {
         titles()
-            .first { $0.contentId == contentId }?
-            .files
+            .filter { $0.contentId == contentId }
+            .flatMap(\.files)
             .filter { $0.season == season && $0.episode == episode }
-            ?? []
     }
 
     func replace(titles: [SMBIndexedTitle], forServerID serverID: String) {

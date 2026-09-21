@@ -638,13 +638,15 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
         attachColorSpace(from: frame, to: pb)
         attachPixelAspectRatio(from: frame, to: pb)
 
-        CVPixelBufferLockBaseAddress(pb, [])
+        // A failed lock leaves no plane to write; both planes are read below, so this fails the same
+        // way every other step here does: no buffer, and the caller drops the frame.
+        guard CVPixelBufferLockBaseAddress(pb, []) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(pb, []) }
 
-        let yPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 0)!
-            .assumingMemoryBound(to: UInt8.self)
-        let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 1)!
-            .assumingMemoryBound(to: UInt8.self)
+        guard let yPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 0)?
+            .assumingMemoryBound(to: UInt8.self),
+              let cbcrPlane = CVPixelBufferGetBaseAddressOfPlane(pb, 1)?
+            .assumingMemoryBound(to: UInt8.self) else { return nil }
 
         var dstData: (UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?,
                       UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?, UnsafeMutablePointer<UInt8>?)

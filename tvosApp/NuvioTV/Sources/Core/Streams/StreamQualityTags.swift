@@ -376,10 +376,12 @@ enum LastStreamQualityStore {
 
         var records = loadRecords(profileId: profileId)
         records[trimmedId] = tags
-        persistRecords(records, profileId: profileId)
 
-        // Clear legacy UserDefaults key if present
-        defaults(for: profileId).removeObject(forKey: prefix + trimmedId)
+        // Clear the legacy UserDefaults key only after a successful file write,
+        // the contract LargePayloadStore.write documents.
+        if persistRecords(records, profileId: profileId) {
+            defaults(for: profileId).removeObject(forKey: prefix + trimmedId)
+        }
     }
 
     static func save(metaId: String, stream: NuvioStream, profileId: String? = nil) {
@@ -488,15 +490,16 @@ enum LastStreamQualityStore {
         return migrated
     }
 
-    private static func persistRecords(_ records: [String: StreamQualityTags], profileId: String?) {
+    @discardableResult
+    private static func persistRecords(_ records: [String: StreamQualityTags], profileId: String?) -> Bool {
         let key = storageKey(for: profileId)
         if records.isEmpty {
             LargePayloadStore.remove(key: key, directory: storageDirectoryName)
-            return
+            return true
         }
         let bounded = Dictionary(uniqueKeysWithValues: records.prefix(maxEntries).map { ($0.key, $0.value) })
-        guard let data = try? JSONEncoder().encode(bounded) else { return }
-        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
+        guard let data = try? JSONEncoder().encode(bounded) else { return false }
+        return LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
@@ -532,10 +535,18 @@ enum LastPlaybackStreamStore {
         if url.scheme?.lowercased() == "smb" { return false }
         guard let host = url.host?.lowercased() else { return false }
         if host == "127.0.0.1" || host == "localhost" { return false }
-        if host.hasPrefix("192.168.") || host.hasPrefix("10.") || host.hasPrefix("172.16.") || host.hasPrefix("172.17.") || host.hasPrefix("172.18.") || host.hasPrefix("172.19.") || host.hasPrefix("172.2") || host.hasPrefix("172.30.") || host.hasPrefix("172.31.") {
+        if host.hasPrefix("192.168.") || host.hasPrefix("10.") || isPrivate172Host(host) {
             return false
         }
         return true
+    }
+
+    /// RFC 1918 range 172.16.0.0/12. A bare `hasPrefix("172.2")` also caught the
+    /// public 172.2.0.0/16 block, so those remote URLs never expired.
+    private static func isPrivate172Host(_ host: String) -> Bool {
+        let octets = host.split(separator: ".")
+        guard octets.count == 4, octets[0] == "172", let second = Int(octets[1]) else { return false }
+        return (16...31).contains(second)
     }
 
     static func save(
@@ -564,10 +575,13 @@ enum LastPlaybackStreamStore {
 
         var records = loadRecords(profileId: profileId)
         records[trimmedMetaId] = record
-        persistRecords(records, profileId: profileId)
 
-        let store = defaults(for: profileId)
-        store.removeObject(forKey: prefix + trimmedMetaId)
+        // Clear the legacy UserDefaults key only after a successful file write,
+        // the contract LargePayloadStore.write documents.
+        if persistRecords(records, profileId: profileId) {
+            let store = defaults(for: profileId)
+            store.removeObject(forKey: prefix + trimmedMetaId)
+        }
     }
 
     static func load(
@@ -689,15 +703,16 @@ enum LastPlaybackStreamStore {
         return migrated
     }
 
-    private static func persistRecords(_ records: [String: Record], profileId: String?) {
+    @discardableResult
+    private static func persistRecords(_ records: [String: Record], profileId: String?) -> Bool {
         let key = storageKey(for: profileId)
         if records.isEmpty {
             LargePayloadStore.remove(key: key, directory: storageDirectoryName)
-            return
+            return true
         }
         let bounded = Dictionary(uniqueKeysWithValues: records.prefix(maxEntries).map { ($0.key, $0.value) })
-        guard let data = try? JSONEncoder().encode(bounded) else { return }
-        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
+        guard let data = try? JSONEncoder().encode(bounded) else { return false }
+        return LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
@@ -1415,8 +1430,8 @@ enum StreamBadgeSizing {
         let pattern = #"(\d+(?:[.,]\d+)?)\s*(TB|GB|MB|KB)"#
         guard let match = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else { return nil }
         let token = String(text[match])
-        let numberText = token.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
-            .first(where: { Double($0) != nil }) ?? "0"
+        let numberText = token.components(separatedBy: CharacterSet(charactersIn: "0123456789.,").inverted)
+            .first(where: { Double($0.replacingOccurrences(of: ",", with: ".")) != nil }) ?? "0"
         let number = Double(numberText.replacingOccurrences(of: ",", with: ".")) ?? 0
         let upper = token.uppercased()
         let multiplier: Double = upper.contains("TB") ? 1_099_511_627_776 :

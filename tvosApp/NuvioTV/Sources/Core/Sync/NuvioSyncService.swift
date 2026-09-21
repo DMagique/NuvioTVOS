@@ -2251,9 +2251,10 @@ fileprivate final class NuvioAPIClient {
                 session: session,
                 params: [:]
             )
-            let locks = Dictionary(uniqueKeysWithValues: lockRows.elements.map {
-                ($0.profileIndex, $0.pinEnabled)
-            })
+            let locks = Dictionary(
+                lockRows.elements.map { ($0.profileIndex, $0.pinEnabled) },
+                uniquingKeysWith: { _, latest in latest }
+            )
             return rows.elements.map { profile in
                 profile.withPinEnabled(locks[profile.profileIndex] ?? profile.pinEnabled)
             }

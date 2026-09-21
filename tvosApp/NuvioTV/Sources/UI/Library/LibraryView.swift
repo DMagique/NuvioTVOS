@@ -540,6 +540,14 @@ public struct LibraryView: View {
             cloudViewModel.play(item: item, file: playable[0]) { url, meta in
                 onPlayCloudFile?(url, meta)
             }
+            // The tap locked focus to this one row. If playback never opens
+            // (resolution failed, or the tap was ignored because another
+            // resolution is in flight) nothing else lifts that restriction.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                if overlayRestoreCloudItemID == item.stableKey {
+                    overlayRestoreCloudItemID = nil
+                }
+            }
         } else if !playable.isEmpty {
             openCloudItem = item
             let firstKey = "\(item.stableKey):\(playable[0].id)"

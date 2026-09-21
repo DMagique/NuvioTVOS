@@ -78,11 +78,14 @@ enum BingeGroupStore {
 
         var records = loadRecords(profileId: profileId)
         records[trimmedId] = record
-        persistRecords(records, profileId: profileId)
 
-        // Clear legacy UserDefaults key if present
-        let store = defaults(for: profileId)
-        store.removeObject(forKey: prefix + trimmedId)
+        // Clear the legacy UserDefaults key only once the file write succeeded:
+        // LargePayloadStore.write documents that contract, and clearing it after a
+        // failed write loses the record from both tiers.
+        if persistRecords(records, profileId: profileId) {
+            let store = defaults(for: profileId)
+            store.removeObject(forKey: prefix + trimmedId)
+        }
     }
 
     static func save(
@@ -193,7 +196,8 @@ enum BingeGroupStore {
         return migrated
     }
 
-    private static func persistRecords(_ records: [String: BingeGroupRecord], profileId: String?) {
+    @discardableResult
+    private static func persistRecords(_ records: [String: BingeGroupRecord], profileId: String?) -> Bool {
         let bounded = Dictionary(
             uniqueKeysWithValues: records
                 .sorted { $0.value.timestamp > $1.value.timestamp }
@@ -203,10 +207,10 @@ enum BingeGroupStore {
         let key = storageKey(for: profileId)
         if bounded.isEmpty {
             LargePayloadStore.remove(key: key, directory: storageDirectoryName)
-            return
+            return true
         }
-        guard let data = try? JSONEncoder().encode(bounded) else { return }
-        LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
+        guard let data = try? JSONEncoder().encode(bounded) else { return false }
+        return LargePayloadStore.write(data, key: key, directory: storageDirectoryName)
     }
 
     private static func defaults(for profileId: String?) -> UserDefaults {
