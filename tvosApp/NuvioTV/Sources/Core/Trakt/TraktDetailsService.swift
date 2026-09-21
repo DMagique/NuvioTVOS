@@ -227,9 +227,15 @@ private struct TraktRelatedMovieDTO: Decodable {
     func toRelatedTitle() -> RelatedTitle? {
         let name = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return nil }
-        let id = ids?.imdb.flatMap { $0.hasPrefix("tt") ? $0 : nil }
-            ?? ids?.tmdb.map { "tmdb:\($0)" }
-            ?? ids?.slug.map { "trakt:\($0)" }
+        // Kept as separate statements: the single chained expression made the
+        // Swift 6.2 type checker give up on Xcode 26.3 ("unable to type-check
+        // this expression in reasonable time").
+        let imdbId: String? = ids?.imdb.flatMap { (value: String) -> String? in
+            value.hasPrefix("tt") ? value : nil
+        }
+        let tmdbId: String? = ids?.tmdb.map { "tmdb:\($0)" }
+        let slugId: String? = ids?.slug.map { "trakt:\($0)" }
+        let id = imdbId ?? tmdbId ?? slugId
         guard let id else { return nil }
         return RelatedTitle(
             id: id,
@@ -253,9 +259,14 @@ private struct TraktRelatedShowDTO: Decodable {
     func toRelatedTitle() -> RelatedTitle? {
         let name = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return nil }
-        let id = ids?.imdb.flatMap { $0.hasPrefix("tt") ? $0 : nil }
-            ?? ids?.tmdb.map { "tmdb:\($0)" }
-            ?? ids?.slug.map { "trakt:\($0)" }
+        // Same split as TraktRelatedMovieDTO: one chained expression trips the
+        // Swift 6.2 type checker on Xcode 26.3.
+        let imdbId: String? = ids?.imdb.flatMap { (value: String) -> String? in
+            value.hasPrefix("tt") ? value : nil
+        }
+        let tmdbId: String? = ids?.tmdb.map { "tmdb:\($0)" }
+        let slugId: String? = ids?.slug.map { "trakt:\($0)" }
+        let id = imdbId ?? tmdbId ?? slugId
         guard let id else { return nil }
         return RelatedTitle(
             id: id,
