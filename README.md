@@ -1,8 +1,8 @@
-> **Development fork.** This repository is MagiqueDeveloper's working copy for changes destined for [`bobsupra/NuvioTVOS`](https://github.com/bobsupra/NuvioTVOS). It is not the canonical app, release channel, or issue tracker.
+> **Development fork.** This repository is DMagique's working copy for changes destined for [`bobsupra/NuvioTVOS`](https://github.com/bobsupra/NuvioTVOS). It is not the canonical app, release channel, or issue tracker.
 >
 > - **Upstream (releases, issues, PRs):** https://github.com/bobsupra/NuvioTVOS  
-> - **This fork (WIP branches / experiments):** https://github.com/MagiqueDeveloper/NuvioTVOS  
-> - **Nightly IPA (this fork):** code changes pushed to `main` and a daily schedule refresh the rolling [`nightly`](https://github.com/MagiqueDeveloper/NuvioTVOS/releases/tag/nightly) prerelease with the latest versioned unsigned IPA.
+> - **This fork (WIP branches / experiments):** https://github.com/DMagique/NuvioTVOS  
+> - **Nightly IPA (this fork):** code changes pushed to `main` and a daily schedule refresh the rolling [`nightly`](https://github.com/DMagique/NuvioTVOS/releases/tag/nightly) prerelease with the latest versioned unsigned IPA.
 > - Open bugs and feature requests on the [upstream issue tracker](https://github.com/bobsupra/NuvioTVOS/issues). Download official builds from [upstream Releases](https://github.com/bobsupra/NuvioTVOS/releases).
 
 <div align="center">
@@ -170,7 +170,7 @@ The app targets Apple TV (`SDKROOT = appletvos`) with bundle id `com.pyksel.nuvi
 ## Setup
 
 ```bash
-git clone https://github.com/MagiqueDeveloper/NuvioTVOS.git
+git clone https://github.com/DMagique/NuvioTVOS.git
 cd NuvioTVOS
 ```
 
@@ -257,7 +257,7 @@ Some older verification scripts in `tvosApp/` still carry inherited iOS wording.
 - `tvosApp/NuvioTV/Sources/ViewModels/` contains the Swift view models for tvOS flows.
 - `tvosApp/NuvioTV/Sources/Data/Repository/` contains catalog, metadata, source, and subtitle fetching.
 - `tvosApp/NuvioTV/Sources/Core/Auth/` contains Supabase email and TV QR-login support.
-- `MPVKit/` is a vendored [NuvioMedia/MPVKit](https://github.com/NuvioMedia/MPVKit) snapshot (MoltenVK tvOS) whose `Libmpv` binary is hosted on this fork's [`mpvkit-libmpv`](https://github.com/MagiqueDeveloper/NuvioTVOS/releases/tag/mpvkit-libmpv) release.
+- `MPVKit/` is a vendored [NuvioMedia/MPVKit](https://github.com/NuvioMedia/MPVKit) snapshot (MoltenVK tvOS) whose `Libmpv` binary is hosted on this fork's [`mpvkit-libmpv`](https://github.com/DMagique/NuvioTVOS/releases/tag/mpvkit-libmpv) release.
 - `Vendor/AetherEngine/` is the primary playback engine package.
 
 ## Built With
