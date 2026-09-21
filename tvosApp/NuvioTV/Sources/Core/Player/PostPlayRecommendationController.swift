@@ -235,7 +235,7 @@ final class PostPlayRecommendationController: ObservableObject {
 
     private func fetchFilteredCandidates(for meta: NuvioMeta) async -> [RelatedTitle] {
         let rawCandidates: [RelatedTitle]
-        if TraktSettingsStore.moreLikeThisSource == .trakt && TraktAuthStore.state.isAuthenticated {
+        if TraktSettingsStore.moreLikeThisSource == .trakt && TraktAuthStore.isAuthenticated {
             rawCandidates = await TraktDetailsService.fetchRelated(for: meta, limit: 16)
         } else {
             rawCandidates = await TmdbDetailsService.fetchMoreLikeThis(for: meta, limit: 16)

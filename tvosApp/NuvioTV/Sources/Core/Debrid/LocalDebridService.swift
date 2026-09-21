@@ -5,6 +5,48 @@ struct LocalDebridCachedItem: Sendable {
     let size: Int64?
 }
 
+private actor RealDebridAvailabilityCache {
+    static let shared = RealDebridAvailabilityCache()
+    private var cache: [String: (item: LocalDebridCachedItem?, expiresAt: Date)] = [:]
+    private var lastRequestTime = Date.distantPast
+    private let minimumRequestInterval: TimeInterval = 1.0 // Real-Debrid rate limit: 1 req/sec
+
+    func lookup(hashes: [String]) -> (cached: [String: LocalDebridCachedItem], missing: [String]) {
+        let now = Date()
+        var found: [String: LocalDebridCachedItem] = [:]
+        var missing: [String] = []
+        for hash in hashes {
+            let lower = hash.lowercased()
+            if let entry = cache[lower], entry.expiresAt > now {
+                if let item = entry.item {
+                    found[lower] = item
+                }
+            } else {
+                missing.append(lower)
+            }
+        }
+        return (found, missing)
+    }
+
+    func store(items: [String: LocalDebridCachedItem], checkedHashes: [String], ttl: TimeInterval = 300) {
+        let expires = Date().addingTimeInterval(ttl)
+        for hash in checkedHashes {
+            let lower = hash.lowercased()
+            cache[lower] = (items[lower], expires)
+        }
+    }
+
+    func waitPacer() async {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastRequestTime)
+        if elapsed < minimumRequestInterval {
+            let delay = minimumRequestInterval - elapsed
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+        lastRequestTime = Date()
+    }
+}
+
 struct LocalDebridService: Sendable {
     private let session: URLSession
 
@@ -75,17 +117,29 @@ struct LocalDebridService: Sendable {
     // MARK: - Real-Debrid
 
     private func checkRealDebridCached(apiKey: String, hashes: [String]) async -> [String: LocalDebridCachedItem]? {
-        let hashPath = hashes.prefix(50).joined(separator: "/")
-        guard let url = URL(string: "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/\(hashPath)") else { return nil }
+        let (cached, missing) = await RealDebridAvailabilityCache.shared.lookup(hashes: hashes)
+        if missing.isEmpty {
+            return cached
+        }
+
+        await RealDebridAvailabilityCache.shared.waitPacer()
+
+        let hashPath = missing.prefix(50).joined(separator: "/")
+        guard let url = URL(string: "https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/\(hashPath)") else { return cached }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))", forHTTPHeaderField: "Authorization")
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return nil }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            guard let http = response as? HTTPURLResponse else { return cached.isEmpty ? nil : cached }
+            if http.statusCode == 429 {
+                print("[LocalDebridService] Real-Debrid instantAvailability returned 429 (rate limited)")
+                return cached.isEmpty ? nil : cached
+            }
+            guard 200..<300 ~= http.statusCode else { return cached.isEmpty ? nil : cached }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return cached.isEmpty ? nil : cached }
 
-            var result: [String: LocalDebridCachedItem] = [:]
+            var fetched: [String: LocalDebridCachedItem] = [:]
             for (hash, val) in json {
                 guard let providerDict = val as? [String: Any],
                       let rdArray = providerDict["rd"] as? [[String: Any]],
@@ -103,11 +157,18 @@ struct LocalDebridService: Sendable {
                         }
                     }
                 }
-                result[hash.lowercased()] = LocalDebridCachedItem(name: firstName, size: totalSize)
+                fetched[hash.lowercased()] = LocalDebridCachedItem(name: firstName, size: totalSize)
             }
-            return result
+            let checkedBatch = Array(missing.prefix(50))
+            await RealDebridAvailabilityCache.shared.store(items: fetched, checkedHashes: checkedBatch)
+
+            var merged = cached
+            for (k, v) in fetched {
+                merged[k] = v
+            }
+            return merged
         } catch {
-            return nil
+            return cached.isEmpty ? nil : cached
         }
     }
 

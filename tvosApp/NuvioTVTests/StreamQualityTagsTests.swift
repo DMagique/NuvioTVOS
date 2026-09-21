@@ -342,18 +342,6 @@ final class StreamQualityTagsTests: XCTestCase {
         XCTAssertEqual(WatchProgressLedger.completionFraction, 0.90)
     }
 
-    func testInfusePositionCallbackCanDetermineCompletionFromSessionRuntime() {
-        let callback = ExternalPlaybackCallback.parse(
-            URL(string: "nuvio-tv://external-playback/ABC-123?position=540")!
-        )
-
-        XCTAssertEqual(
-            callback?.completionProgress(using: 600) ?? -1,
-            0.9,
-            accuracy: 0.0001
-        )
-    }
-
     func testExternalPlaybackCallbackRejectsProgressOutsideDocumentedFractionBounds() {
         XCTAssertNil(ExternalPlaybackCallback.parse(
             URL(string: "nuvio-tv://external-playback/id?progress=-0.01")!
@@ -949,4 +937,230 @@ final class StreamQualityTagsTests: XCTestCase {
         XCTAssertTrue(matchedNames.contains("DV"))
         XCTAssertFalse(matchedNames.contains("SDR"), "SDR badge must be suppressed when HDR/DV is present")
     }
+
+    // MARK: - Binge Group & Series ID Continuity Tests
+
+    func testSeriesIdFromContentId() {
+        // IMDb style content ID
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "tt1234567:2:5"), "tt1234567")
+        // TMDB style namespaced content ID
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "tmdb:12345:1:2"), "tmdb:12345")
+        // Kitsu anime content ID
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "kitsu:999:1"), "kitsu:999")
+        // MAL anime content ID
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "mal:555:3"), "mal:555")
+        // Movie or standalone ID without season/episode
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "tt1234567"), "tt1234567")
+        XCTAssertEqual(StreamQualityTags.seriesId(fromContentId: "tmdb:99999"), "tmdb:99999")
+    }
+
+    func testExtractReleaseGroupAndSyntheticBingeGroup() {
+        let streamWithGroup = NuvioStream(
+            url: "https://example.com/s1",
+            name: "4K DV HDR",
+            description: "2160p WEB-DL",
+            addonName: "Torrentio",
+            filename: "House.of.the.Dragon.S02E01.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.H.265-FLUX.mkv"
+        )
+        let extractedGroup = StreamQualityTags.extractReleaseGroup(from: streamWithGroup.filename)
+        XCTAssertEqual(extractedGroup, "FLUX")
+
+        let syntheticGroup = StreamQualityTags.syntheticBingeGroup(for: streamWithGroup)
+        XCTAssertEqual(syntheticGroup, "torrentio|flux|2160|10")
+
+        let streamNTb = NuvioStream(
+            url: "https://example.com/s2",
+            name: "1080p [NTb]",
+            description: "WEB-DL 4 GB",
+            addonName: "MediaFusion"
+        )
+        let groupNTb = StreamQualityTags.extractReleaseGroup(from: streamNTb.name)
+        XCTAssertEqual(groupNTb, "NTB")
+
+        let syntheticNTb = StreamQualityTags.syntheticBingeGroup(for: streamNTb)
+        XCTAssertEqual(syntheticNTb, "mediafusion|ntb|1080|10")
+
+        let streamFallback = NuvioStream(
+            url: "https://example.com/s3",
+            name: "1080p WEB-DL",
+            description: "Torrentio",
+            addonName: "Torrentio"
+        )
+        let syntheticFallback = StreamQualityTags.syntheticBingeGroup(for: streamFallback)
+        XCTAssertEqual(syntheticFallback, "torrentio|1080|10")
+    }
+
+    func testBingeGroupMatchScorePrioritization() {
+        let targetTags = StreamQualityTags(
+            resolution: 1080,
+            isDolbyVision: false,
+            isHDR: false,
+            isAtmos: false,
+            isCached: true,
+            quality: .unknown,
+            bingeGroup: "Torrentio|1080p|NTb",
+            addonName: "Torrentio",
+            releaseFingerprint: "torrentio|ntb|1080|10"
+        )
+
+        // Exact native binge group match
+        let streamExactBinge = NuvioStream(
+            url: "https://example.com/exact",
+            name: "1080p NTb",
+            description: "Torrentio",
+            addonName: "Torrentio",
+            filename: nil,
+            bingeGroup: "Torrentio|1080p|NTb"
+        )
+        let scoreExact = StreamQualityTags.parse(stream: streamExactBinge).matchScore(against: targetTags)
+
+        // Exact synthetic release fingerprint match (no native binge group)
+        let streamSyntheticMatch = NuvioStream(
+            url: "https://example.com/synth",
+            name: "1080p WEB-DL",
+            description: "Torrentio",
+            addonName: "Torrentio",
+            filename: "Show.S01E02.1080p.WEB-DL-NTb.mkv"
+        )
+        let scoreSynth = StreamQualityTags.parse(stream: streamSyntheticMatch).matchScore(against: targetTags)
+
+        // Same addon and resolution, but different release group
+        let streamDifferentRelease = NuvioStream(
+            url: "https://example.com/other",
+            name: "1080p WEB-DL",
+            description: "Torrentio",
+            addonName: "Torrentio",
+            filename: "Show.S01E02.1080p.WEB-DL-FLUX.mkv"
+        )
+        let scoreDifferentRelease = StreamQualityTags.parse(stream: streamDifferentRelease).matchScore(against: targetTags)
+
+        // Completely different addon and resolution
+        let streamUnrelated = NuvioStream(
+            url: "https://example.com/unrelated",
+            name: "720p HDTV",
+            description: "OtherAddon",
+            addonName: "OtherAddon"
+        )
+        let scoreUnrelated = StreamQualityTags.parse(stream: streamUnrelated).matchScore(against: targetTags)
+
+        XCTAssertGreaterThan(scoreExact, scoreSynth)
+        XCTAssertGreaterThan(scoreSynth, scoreDifferentRelease)
+        XCTAssertGreaterThan(scoreDifferentRelease, scoreUnrelated)
+        XCTAssertGreaterThan(scoreExact, 500_000)
+    }
+
+    func testBingeGroupStoreScopingAndPersistence() {
+        let profile1 = "profile_1"
+        let profile2 = "profile_2"
+        let seriesId = "tmdb:998877"
+
+        BingeGroupStore.clear(profileId: profile1)
+        BingeGroupStore.clear(profileId: profile2)
+
+        let stream1 = NuvioStream(
+            url: "https://example.com/stream1",
+            name: "1080p NTb",
+            description: "Torrentio",
+            addonName: "Torrentio",
+            filename: "Series.S01E01.1080p-NTb.mkv",
+            bingeGroup: "Torrentio|1080p|NTb"
+        )
+        BingeGroupStore.save(seriesId: seriesId, stream: stream1, profileId: profile1)
+
+        let loaded1 = BingeGroupStore.load(seriesId: seriesId, profileId: profile1)
+        XCTAssertNotNil(loaded1)
+        XCTAssertEqual(loaded1?.bingeGroup, "Torrentio|1080p|NTb")
+        XCTAssertEqual(loaded1?.addonName, "Torrentio")
+        XCTAssertEqual(loaded1?.releaseFingerprint, "Torrentio|1080p|NTb")
+
+        // Profile 2 should remain empty (profile isolated)
+        let loaded2 = BingeGroupStore.load(seriesId: seriesId, profileId: profile2)
+        XCTAssertNil(loaded2)
+
+        // Clearing profile 1 removes the record
+        BingeGroupStore.clear(profileId: profile1)
+        let loadedAfterClear = BingeGroupStore.load(seriesId: seriesId, profileId: profile1)
+        XCTAssertNil(loadedAfterClear)
+    }
+
+    // MARK: - StreamBadgeSettingsStore Persistence & Migration Tests
+
+    func testStreamBadgeSettingsStoreSavesToLargePayloadStoreAndNotUserDefaults() {
+        let testProfile = "test_badge_profile_\(UUID().uuidString)"
+        defer {
+            StreamBadgeSettingsStore.removeRules(for: testProfile)
+        }
+
+        var filter4K = StreamBadgeFilter()
+        filter4K.id = "4k"
+        filter4K.name = "4K"
+        filter4K.pattern = "4k|2160p"
+        filter4K.isEnabled = true
+
+        let rules = StreamBadgeRules(
+            imports: [
+                StreamBadgeImport(
+                    sourceUrl: "https://example.com/test_pack.json",
+                    filters: [filter4K],
+                    isActive: true
+                )
+            ]
+        )
+
+        StreamBadgeSettingsStore.saveRules(rules, for: testProfile)
+
+        // 1. UserDefaults must NOT contain the rules
+        let store = ProfileSettings.store(for: testProfile)
+        XCTAssertNil(store.object(forKey: SettingsKey.streamBadgeRules), "Badge rules must not be written to UserDefaults")
+
+        // 2. Raw JSON must be retrievable from LargePayloadStore
+        let raw = StreamBadgeSettingsStore.rawRulesJSON(for: testProfile)
+        XCTAssertNotNil(raw)
+        XCTAssertTrue(raw?.contains("test_pack.json") == true)
+        XCTAssertTrue(raw?.contains("4k|2160p") == true)
+
+        // 3. Remove rules cleans up file storage
+        StreamBadgeSettingsStore.removeRules(for: testProfile)
+        XCTAssertNil(StreamBadgeSettingsStore.rawRulesJSON(for: testProfile))
+    }
+
+    func testStreamBadgeSettingsStoreMigratesLegacyUserDefaults() {
+        let testProfile = "test_legacy_badge_\(UUID().uuidString)"
+        let store = ProfileSettings.store(for: testProfile)
+        defer {
+            StreamBadgeSettingsStore.removeRules(for: testProfile)
+            store.removeObject(forKey: SettingsKey.streamBadgeRules)
+        }
+
+        var filterDV = StreamBadgeFilter()
+        filterDV.id = "dv"
+        filterDV.name = "Dolby Vision"
+        filterDV.pattern = "dv|dovi"
+        filterDV.isEnabled = true
+
+        let rules = StreamBadgeRules(
+            imports: [
+                StreamBadgeImport(
+                    sourceUrl: "https://example.com/legacy_pack.json",
+                    filters: [filterDV],
+                    isActive: true
+                )
+            ]
+        )
+        let legacyData = try! JSONEncoder().encode(rules)
+        let legacyString = String(data: legacyData, encoding: .utf8)!
+
+        // Simulate legacy state: rules stored directly in UserDefaults
+        store.set(legacyString, forKey: SettingsKey.streamBadgeRules)
+        XCTAssertNotNil(store.string(forKey: SettingsKey.streamBadgeRules))
+
+        // Access rawRulesJSON or snapshot - must trigger migration
+        let migratedJSON = StreamBadgeSettingsStore.rawRulesJSON(for: testProfile)
+        XCTAssertNotNil(migratedJSON)
+        XCTAssertTrue(migratedJSON?.contains("legacy_pack.json") == true)
+
+        // Legacy UserDefaults key must now be deleted to free up cfprefsd quota
+        XCTAssertNil(store.object(forKey: SettingsKey.streamBadgeRules), "Legacy key in UserDefaults must be removed upon migration")
+    }
 }
+

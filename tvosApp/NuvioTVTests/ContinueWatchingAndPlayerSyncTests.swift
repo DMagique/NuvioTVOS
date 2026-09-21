@@ -133,6 +133,9 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(localKeys.contains(SettingsKey.playerShowEpisodes))
         XCTAssertTrue(localKeys.contains(SettingsKey.playerShowSources))
         XCTAssertTrue(localKeys.contains(SettingsKey.playerShowSubtitles))
+        XCTAssertTrue(localKeys.contains(SettingsKey.seekPreviewEnabled))
+        XCTAssertTrue(localKeys.contains(SettingsKey.streamAutoPlayPreferBingeGroup))
+        XCTAssertTrue(localKeys.contains(SettingsKey.streamAutoPlayReuseBingeGroup))
 
         let remoteKeys = PlayerSettingsSyncMapper.remoteToLocalKeyMappings.map(\.remote)
         XCTAssertTrue(remoteKeys.contains("preferred_audio_language"))
@@ -141,6 +144,8 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(remoteKeys.contains("subtitle_use_forced_subtitles"))
         XCTAssertTrue(remoteKeys.contains("stream_auto_play_next_episode_enabled"))
         XCTAssertTrue(remoteKeys.contains("stream_auto_play_timeout_seconds"))
+        XCTAssertTrue(remoteKeys.contains("stream_auto_play_prefer_binge_group"))
+        XCTAssertTrue(remoteKeys.contains("stream_auto_play_reuse_binge_group"))
         XCTAssertTrue(remoteKeys.contains("stream_cached_only"))
         XCTAssertTrue(remoteKeys.contains("cached_only_streams"))
         XCTAssertTrue(remoteKeys.contains("stream_sort_mode"))
@@ -153,6 +158,7 @@ final class ContinueWatchingAndPlayerSyncTests: XCTestCase {
         XCTAssertTrue(remoteKeys.contains("player_show_episodes"))
         XCTAssertTrue(remoteKeys.contains("player_show_sources"))
         XCTAssertTrue(remoteKeys.contains("player_show_subtitles"))
+        XCTAssertTrue(remoteKeys.contains("seek_preview_enabled"))
     }
 
     func testAutoPlayModeWireMapping() {

@@ -21,6 +21,7 @@ captures
 node_modules/
 **/Pods/
 logs/
+/sideloadlydaemon.log
 analysis/
 # Upstream used `Docs` for generated material. Keep this fork's `docs/` tracked
 # (macOS gitignore is case-insensitive, so `/Docs` would also hide `/docs`).
@@ -33,6 +34,11 @@ asset
 tools
 server
 
+# Local Android TV reference checkout; this tvOS repository does not track it
+/NuvioTVandroid/
+
+# Local implementation note; this fork tracks FUTURE_IMPLEMENTATION.md instead
+/IMPLEMENTATION_PLAN.md
 # Built IPAs are distributed via GitHub Releases, not committed
 *.ipa
 build-ipa/
@@ -47,3 +53,12 @@ supabase/functions/**/.env
 supabase/functions/**/.env.local
 MPVKit/.build/
 MPVKit/.swiftpm/
+
+# Tuist: the Xcode project is generated, not tracked. Run `tuist generate`.
+tvosApp/NuvioTV.xcodeproj/
+tvosApp/NuvioTV.xcworkspace/
+/.tuist/
+**/Derived/
+# Local signing values (Team ID); see tvosApp/Configurations/README.md.
+# Signing.xcconfig itself IS tracked and optional-includes this file.
+tvosApp/Configurations/Signing.local.xcconfig

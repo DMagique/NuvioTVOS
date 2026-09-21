@@ -47,6 +47,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     var isLiveStream = false
 
     private var performance = SWPerformanceSnapshot.zero
+    private var hasFilmGrain = false
 
     var performanceSnapshot: SWPerformanceSnapshot {
         lock.lock()
@@ -57,8 +58,8 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     var filmGrainDebugValue: String {
         lock.lock()
         defer { lock.unlock() }
-        guard let ctx = codecContext else { return "-" }
-        return (ctx.pointee.properties & UInt32(FF_CODEC_PROPERTY_FILM_GRAIN)) != 0 ? "on" : "off"
+        guard codecContext != nil else { return "-" }
+        return hasFilmGrain ? "on" : "off"
     }
 
     /// Skip pre-seek frames; decoded for reference but not converted.
@@ -97,6 +98,9 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     /// applied to the filter there (mutating it mid-stream would need a graph rebuild).
     var deinterlaceConfig = DeinterlaceConfig()
 
+    /// #544: decode on the calling thread with no frame-level threading. Set before .
+    var decodesSingleThreaded = false
+
     /// AE#499: what the container declared about colour, captured at `open` before a single frame
     /// exists. A decoded frame carries the VUI alone, and a remux whose VUI is empty would otherwise
     /// reach `attachColorSpace` as an untagged picture, so an HDR10 file decoded in software lost its
@@ -125,6 +129,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {
         self.onFrame = onFrame
         deinterlacer.config = deinterlaceConfig
+        hasFilmGrain = false
 
         guard let codecpar = stream.pointee.codecpar else {
             throw VideoDecoderError.noCodecParameters
@@ -178,8 +183,14 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             isLive: isLiveStream,
             availableThreadCount: ProcessInfo.processInfo.activeProcessorCount
         )
-        ctx.pointee.thread_count = Int32(tuning.threadCount)
-        ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+
+        if decodesSingleThreaded {
+            ctx.pointee.thread_count = 1
+            ctx.pointee.thread_type = 0
+        } else {
+            ctx.pointee.thread_count = Int32(tuning.threadCount)
+            ctx.pointee.thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE
+        }
 
         // Belt-and-suspenders hwaccel=none: some decoders ignore get_format.
         var opts: OpaquePointer?
@@ -296,6 +307,10 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
             let ret = avcodec_receive_frame(ctx, f)
             performance.videoDecodeNanoseconds &+= DispatchTime.now().uptimeNanoseconds - decodeStarted
             guard ret >= 0 else { lock.unlock(); break }
+
+            if !hasFilmGrain && av_frame_get_side_data(f, AV_FRAME_DATA_FILM_GRAIN_PARAMS) != nil {
+                hasFilmGrain = true
+            }
 
             // AE#499: fill the fields the VUI left open from the container's declaration BEFORE any
             // consumer reads the frame, for the same reason the timestamp repair below runs here.
@@ -469,6 +484,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
     func flush() {
         lock.lock()
         defer { lock.unlock() }
+        hasFilmGrain = false
         // AE#492: retires every packet a caller had already decided to send. Bumped under the lock,
         // so a feed that has not reached `avcodec_send_packet` yet is refused from here on.
         _feedEpoch &+= 1
@@ -509,6 +525,7 @@ final class SoftwareVideoDecoder: VideoDecodingPipeline, @unchecked Sendable {
 
     func close() {
         lock.lock()
+        hasFilmGrain = false
         deinterlacer.teardown()
         if codecContext != nil {
             avcodec_free_context(&codecContext)

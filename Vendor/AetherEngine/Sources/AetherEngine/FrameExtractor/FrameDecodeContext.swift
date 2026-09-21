@@ -111,7 +111,7 @@ final class FrameDecodeContext: @unchecked Sendable {
     }
 
     init(url: URL, httpHeaders: [String: String], selectTitleID: Int? = nil,
-         allowsHardwareDecode: Bool = false) {
+         allowsHardwareDecode: Bool = true) {
         self.url = url
         self.httpHeaders = httpHeaders
         self.reader = nil
@@ -120,17 +120,14 @@ final class FrameDecodeContext: @unchecked Sendable {
         self.allowsHardwareDecode = allowsHardwareDecode
     }
 
-    init(reader: IOReader, formatHint: String?, allowsHardwareDecode: Bool = false) {
+    init(reader: IOReader, formatHint: String?, allowsHardwareDecode: Bool = true) {
         // Placeholder; unused when reader != nil (openInternal opens the reader).
         self.url = URL(string: "aether-custom://frame-extractor")!
         self.httpHeaders = [:]
         self.reader = reader
         self.formatHint = formatHint
         self.selectTitleID = nil
-        // DataIOReader is internal and exists for the native segment-cache still path. Recognizing
-        // it here keeps both VOD and live FrameExtractor call sites byte-identical and leaves every
-        // public custom-reader/network caller on the issue #27 software default. The 2026-09-02
-        // device trace measured 30 software context opens in 20 seconds over resident H.264 bytes.
+        // DataIOReader is internal and exists for the native segment-cache still path.
         self.allowsHardwareDecode = allowsHardwareDecode || reader is DataIOReader
     }
 
@@ -372,7 +369,8 @@ final class FrameDecodeContext: @unchecked Sendable {
         mode: FrameMode,
         targetWidth: Int,
         maxSize: CGSize?,
-        isCancelled: () -> Bool
+        isCancelled: () -> Bool,
+        relativeToFirstFrame: Bool = false
     ) -> CGImage? {
         guard isOpen, let ctx = codecContext, let demuxer else { return nil }
 
@@ -402,10 +400,13 @@ final class FrameDecodeContext: @unchecked Sendable {
                 category: .swPlayback)
         }
 
-        demuxer.seek(to: seekSeconds)
+        // Isolated fMP4 segments can retain absolute tfdt or restart at zero.
+        // Decode from their first frame and measure an offset on that same axis.
+        demuxer.seek(to: relativeToFirstFrame ? 0 : seekSeconds)
 
-        guard timeBase.num > 0 else { return nil }
-        let targetPTS = Int64((seekSeconds * Double(timeBase.den)) / Double(timeBase.num))
+        guard timeBase.num > 0, timeBase.den > 0 else { return nil }
+        let targetPTS = (seekSeconds * Double(timeBase.den)) / Double(timeBase.num)
+        var firstFramePTS: Int64?
 
         var frame: UnsafeMutablePointer<AVFrame>? = av_frame_alloc()
         guard frame != nil else { return nil }
@@ -523,10 +524,12 @@ final class FrameDecodeContext: @unchecked Sendable {
                 // Skip frames before targetPTS for frame-accuracy. No-PTS frames
                 // (AV_NOPTS_VALUE == Int64.min) are accepted, so PTS-less streams
                 // degrade to the first frame after the seek.
-                if mode == .snapshot,
-                   f.pointee.pts != Int64.min,
-                   f.pointee.pts < targetPTS {
-                    continue
+                if mode == .snapshot, f.pointee.pts != Int64.min {
+                    if firstFramePTS == nil { firstFramePTS = f.pointee.pts }
+                    let origin = relativeToFirstFrame ? Double(firstFramePTS!) : 0
+                    if Double(f.pointee.pts) - origin < targetPTS {
+                        continue
+                    }
                 }
 
                 if isCancelled() { return nil }
@@ -541,7 +544,8 @@ final class FrameDecodeContext: @unchecked Sendable {
                         mode: mode,
                         targetWidth: targetWidth,
                         maxSize: maxSize,
-                        isCancelled: isCancelled)
+                        isCancelled: isCancelled,
+                        relativeToFirstFrame: relativeToFirstFrame)
                 }
                 return image
             }

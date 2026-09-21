@@ -34,19 +34,24 @@ first_booted_tvos_simulator() {
     | sed -E 's/.*\(([A-F0-9-]+)\) \(Booted\).*/\1/'
 }
 
-ensure_tvos_pods() {
-  if [[ ! -f "$TVOS_APP_DIR/Pods/Manifest.lock" ]]; then
-    require_command pod
-
-    echo "Generating tvOS CocoaPods project..."
-    (cd "$TVOS_APP_DIR" && pod install)
+ensure_tvos_project() {
+  if [[ ! -f "$TVOS_WORKSPACE/contents.xcworkspacedata" ]]; then
+    echo "Generating the tvOS Xcode project with Tuist..."
+    if command -v tuist >/dev/null 2>&1; then
+      (cd "$TVOS_APP_DIR" && tuist generate --no-open)
+    elif command -v mise >/dev/null 2>&1; then
+      (cd "$TVOS_APP_DIR" && mise exec -- tuist generate --no-open)
+    else
+      echo "error: tuist not found. Install it with 'mise install' (see mise.toml)." >&2
+      exit 1
+    fi
   fi
 }
 
 run_tvos_simulator() {
   require_command xcodebuild
   require_command xcrun
-  ensure_tvos_pods
+  ensure_tvos_project
 
   local simulator_id
   simulator_id="$(first_booted_tvos_simulator)"
@@ -80,9 +85,14 @@ run_tvos_simulator() {
   echo "Installing on Apple TV simulator $simulator_id..."
   xcrun simctl install "$simulator_id" "$simulator_app_path"
 
+  # The bundle id is declared in tvosApp/Project.swift; read it from the built
+  # app instead of assuming the value in TVOS_BUNDLE_ID.
+  local bundle_id
+  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$simulator_app_path/Info.plist" 2>/dev/null || echo "$TVOS_BUNDLE_ID")"
+
   echo "Launching tvOS app..."
-  xcrun simctl terminate "$simulator_id" "$TVOS_BUNDLE_ID" >/dev/null 2>&1 || true
-  xcrun simctl launch "$simulator_id" "$TVOS_BUNDLE_ID"
+  xcrun simctl terminate "$simulator_id" "$bundle_id" >/dev/null 2>&1 || true
+  xcrun simctl launch "$simulator_id" "$bundle_id"
 }
 
 main() {

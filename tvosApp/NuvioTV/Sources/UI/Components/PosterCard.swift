@@ -142,12 +142,36 @@ enum AppCardStyle {
         case .pill: return base * 1.8
         }
     }
+
+    /// Computes the aspect-ratio-aware bounding box for seek preview cards,
+    /// ensuring widescreen (2.39:1) and classic (4:3) content fit within maxWidth × maxHeight
+    /// without edge cropping or vertical distortion.
+    static func seekCardSize(
+        for naturalSize: CGSize,
+        maxWidth: CGFloat = 480,
+        maxHeight: CGFloat = 270
+    ) -> CGSize {
+        guard naturalSize.width > 0, naturalSize.height > 0 else {
+            return CGSize(width: maxWidth, height: maxHeight)
+        }
+        let aspect = naturalSize.width / naturalSize.height
+        let targetAspect = maxWidth / maxHeight
+        if aspect >= targetAspect {
+            // Wider than 16:9 (e.g. 2.39:1) -> fit to width, scale height down
+            return CGSize(width: maxWidth, height: max(1, round(maxWidth / aspect)))
+        } else {
+            // Taller than 16:9 (e.g. 4:3) -> fit to height, scale width down
+            return CGSize(width: max(1, round(maxHeight * aspect)), height: maxHeight)
+        }
+    }
 }
 
 /// Poster card component with focus animation (tvOS) and tap handling (iOS)
 struct PosterCard: View {
     let meta: NuvioMeta
     var isLandscape: Bool = false
+    var isAlwaysLandscape: Bool = false
+    var tileShape: CollectionTileShape = .poster
     var continueProgress: Double? = nil
     var continueRemainingText: String? = nil
     var continueEpisodeText: String? = nil
@@ -188,6 +212,9 @@ struct PosterCard: View {
     /// Lets Home retain off-window artwork without leaving every card in the
     /// tvOS focus graph.
     var allowsFocus: Bool = true
+    /// Optional upward-focus fallback for Home's lazy vertical rows. The
+    /// handler deliberately stays off the default path for other directions.
+    var onMove: ((MoveCommandDirection) -> Void)? = nil
     var isWatched: Bool? = nil
     let onClick: () -> Void
 
@@ -215,6 +242,9 @@ struct PosterCard: View {
 
     var body: some View {
         #if os(tvOS)
+        // Keep directional input in tvOS's focus engine. Per-card move
+        // handlers bypass the clickpad dead zone and can turn a light touch
+        // into an immediate focus change.
         Button(action: onClick) {
             posterContent
         }
@@ -223,6 +253,7 @@ struct PosterCard: View {
         .focused($isFocused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: externalFocusValue ?? meta.id))
         .nuvioFocusEffectDisabledIfAvailable()
+        .modifier(OptionalMoveCommandHandler(handler: onMove))
         .titleActionsContextMenu(
             meta: meta,
             onOpenDetails: onOpenDetails ?? onClick,
@@ -312,7 +343,7 @@ struct PosterCard: View {
             onStartFromBeginning: onStartFromBeginning,
             onRemoveFromContinueWatching: onRemoveFromContinueWatching
         )
-        .frame(width: cardWidth, height: totalCardHeight, alignment: .topLeading)
+        .frame(width: layoutWidth, height: totalCardHeight, alignment: .topLeading)
         #endif
     }
 
@@ -340,7 +371,7 @@ struct PosterCard: View {
             // trailer is ready to draw, avoiding a black frame on slow links.
             .opacity(isTrailerPreviewVisible ? 0 : 1)
             .overlay {
-                if isFocused && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
+                if isTrailerPreviewActive && trailersEnabled && !isContinueOrUpcomingCard && !didFinishTrailerPreview {
                     TrailerPreviewPlayer(
                         meta: meta,
                         isActive: isTrailerPreviewActive,
@@ -420,44 +451,48 @@ struct PosterCard: View {
 
     @ViewBuilder
     private var landscapeOverlay: some View {
-        ZStack(alignment: .bottomLeading) {
-            if liquidGlassCards {
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0.0),
-                        .init(color: .black.opacity(0.38), location: 0.35),
-                        .init(color: .black.opacity(0.85), location: 0.85),
-                        .init(color: .black.opacity(0.95), location: 1.0)
-                    ],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
-            } else {
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.78)],
-                    startPoint: .center,
-                    endPoint: .bottom
-                )
-            }
-
-            if continueEpisodeText != nil {
-                continueLandscapeSummary
-            } else if let logoURL = landscapeLogoURL {
-                AsyncImage(url: logoURL) { phase in
-                    if case .success(let image) = phase {
-                        image
-                            .resizable()
-                            .scaledToFit()
+        if shouldShowLandscapeOverlay {
+            ZStack(alignment: .bottomLeading) {
+                if shouldShowLandscapeGradient {
+                    if liquidGlassCards {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0.0),
+                                .init(color: .black.opacity(0.38), location: 0.35),
+                                .init(color: .black.opacity(0.85), location: 0.85),
+                                .init(color: .black.opacity(0.95), location: 1.0)
+                            ],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
                     } else {
-                        fallbackTitle
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.78)],
+                            startPoint: .center,
+                            endPoint: .bottom
+                        )
                     }
                 }
-                .frame(width: landscapeLogoWidth, height: landscapeLogoHeight, alignment: .leading)
-                .padding(22)
-            } else {
-                fallbackTitle
-                    .frame(maxWidth: cardWidth * 0.62, alignment: .leading)
+
+                if continueEpisodeText != nil {
+                    continueLandscapeSummary
+                } else if let logoURL = landscapeLogoURL {
+                    AsyncImage(url: logoURL) { phase in
+                        if case .success(let image) = phase {
+                            image
+                                .resizable()
+                                .scaledToFit()
+                        } else {
+                            fallbackTitle
+                        }
+                    }
+                    .frame(width: landscapeLogoWidth, height: landscapeLogoHeight, alignment: .leading)
                     .padding(22)
+                } else if !isEffectivelyAlwaysLandscape || !showsPosterTitle {
+                    fallbackTitle
+                        .frame(maxWidth: cardWidth * 0.62, alignment: .leading)
+                        .padding(22)
+                }
             }
         }
     }
@@ -609,28 +644,53 @@ struct PosterCard: View {
         focusHighlighterEnabled
     }
 
+    private var isEffectivelyAlwaysLandscape: Bool {
+        isAlwaysLandscape || tileShape == .landscape || meta.tileShape == .landscape
+    }
+
+    private var shouldShowLandscapeOverlay: Bool {
+        if isContinueOrUpcomingCard { return true }
+        if isEffectivelyAlwaysLandscape {
+            return landscapeLogoURL != nil || !showsPosterTitle
+        }
+        return true
+    }
+
+    private var shouldShowLandscapeGradient: Bool {
+        if isContinueOrUpcomingCard { return true }
+        if isEffectivelyAlwaysLandscape {
+            return landscapeLogoURL != nil || !showsPosterTitle
+        }
+        return true
+    }
+
     private var effectiveLandscape: Bool {
-        isLandscape && (landscapeArtworkPrepared || landscapeArtworkURL == nil)
+        if isEffectivelyAlwaysLandscape { return true }
+        return isLandscape && (landscapeArtworkPrepared || landscapeArtworkURL == nil)
     }
 
     private var cardWidth: CGFloat {
         if effectiveLandscape {
-            return 560
+            return effectiveHomeLayout == "Compact" ? 454 : 560
+        }
+        if tileShape == .square || meta.tileShape == .square {
+            return effectiveHomeLayout == "Compact" ? 255 : 315
         }
         return effectiveHomeLayout == "Compact" ? 170 : 210
     }
 
     /// Width the card occupies in the row layout — and therefore its focus
-    /// frame. Always the portrait width, even while the landscape art is shown,
-    /// so a focused landscape card does NOT widen its focus region and bump
-    /// vertical navigation onto the neighbouring column. The 560pt landscape art
-    /// overflows this frame to the right and is drawn above siblings (zIndex).
+    /// frame. Always the portrait width for dynamic expansion, but full width
+    /// for always-landscape / square items.
     private var layoutWidth: CGFloat {
-        effectiveHomeLayout == "Compact" ? 170 : 210
+        if isEffectivelyAlwaysLandscape || tileShape == .square || meta.tileShape == .square {
+            return cardWidth
+        }
+        return effectiveHomeLayout == "Compact" ? 170 : 210
     }
 
     private var cardHeight: CGFloat {
-        effectiveLandscape ? 315 : (effectiveHomeLayout == "Compact" ? 255 : 315)
+        effectiveHomeLayout == "Compact" ? 255 : 315
     }
 
     private var totalCardHeight: CGFloat {
@@ -654,23 +714,29 @@ struct PosterCard: View {
            let continueEpisodeArtworkURL, !continueEpisodeArtworkURL.isEmpty {
             return continueEpisodeArtworkURL
         }
+        if isEffectivelyAlwaysLandscape {
+            return meta.posterUrl ?? meta.backgroundUrl
+        }
         return meta.backgroundUrl ?? meta.posterUrl
     }
 
     private var imageUrl: String? {
-        effectiveLandscape ? landscapeArtworkURL : meta.posterUrl
+        if isEffectivelyAlwaysLandscape {
+            return meta.posterUrl ?? landscapeArtworkURL
+        }
+        return effectiveLandscape ? landscapeArtworkURL : meta.posterUrl
     }
 
     private var landscapePreloadURL: String? {
-        landscapePreloadArmed || isLandscape ? landscapeArtworkURL : nil
+        landscapePreloadArmed || isLandscape || isEffectivelyAlwaysLandscape ? landscapeArtworkURL : nil
     }
 
     private var artworkDecodeWidth: CGFloat {
-        effectiveLandscape ? 560 : cardWidth
+        effectiveLandscape ? (effectiveHomeLayout == "Compact" ? 454 : 560) : cardWidth
     }
 
     private var landscapeArtworkDecodeWidth: CGFloat {
-        560
+        effectiveHomeLayout == "Compact" ? 454 : 560
     }
 
     private var focusedBorderColor: Color {
@@ -1092,9 +1158,8 @@ struct PosterGridCard: View {
     /// Forces the title/subtitle caption to render regardless of the user's
     /// global poster-labels setting (used by Search's Netflix-style grid).
     var forceShowLabels = false
-    /// Optional directional-command hook installed on the focusable Button
-    /// itself. Container-level handlers can miss commands consumed by tvOS's
-    /// focus engine before they bubble out of a poster.
+    /// Optional directional-command hook used by grid search views to transfer
+    /// focus to their keyboard controls at a grid boundary.
     var onMove: ((MoveCommandDirection) -> Void)? = nil
     let action: () -> Void
 
@@ -1228,7 +1293,7 @@ struct PosterGridCard: View {
     }
 }
 
-private struct OptionalMoveCommandHandler: ViewModifier {
+struct OptionalMoveCommandHandler: ViewModifier {
     let handler: ((MoveCommandDirection) -> Void)?
 
     @ViewBuilder
@@ -1240,6 +1305,7 @@ private struct OptionalMoveCommandHandler: ViewModifier {
         }
     }
 }
+
 #endif
 
 #if canImport(UIKit)
@@ -1419,7 +1485,12 @@ struct LoadingPosterCard: View {
     let width: CGFloat
     let height: CGFloat
     var cornerRadius: CGFloat = 16
+    var isFocused: Bool = false
     var isLiquidGlassEnabled: Bool = true
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    }
 
     var body: some View {
         ZStack {
@@ -1430,11 +1501,27 @@ struct LoadingPosterCard: View {
                 .tint(.white.opacity(0.55))
         }
         .frame(width: width, height: height)
+        .background {
+            if !isLiquidGlassEnabled {
+                shape
+                    .fill(Color.white.opacity(isFocused ? 0.14 : 0.07))
+            }
+        }
+        .overlay {
+            if !isLiquidGlassEnabled {
+                shape
+                    .strokeBorder(
+                        isFocused ? AppFocusOutline.color : Color.white.opacity(0.14),
+                        lineWidth: isFocused ? AppFocusOutline.width : 1
+                    )
+            }
+        }
         .modifier(LiquidGlassCardModifier(
             cornerRadius: cornerRadius,
+            isFocused: isFocused,
             isEnabled: isLiquidGlassEnabled
         ))
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .clipShape(shape)
     }
 }
 
@@ -1687,8 +1774,17 @@ actor PosterArtworkCache {
     private var inFlight: [String: Task<UIImage?, Never>] = [:]
 
     init() {
-        cache.countLimit = 220
-        cache.totalCostLimit = 140 * 1024 * 1024
+        let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        if gib > 3.5 {
+            cache.countLimit = 220
+            cache.totalCostLimit = 140 * 1024 * 1024 // 140 MB (Apple TV 4K Gen 2/3)
+        } else if gib > 2.5 {
+            cache.countLimit = 160
+            cache.totalCostLimit = 100 * 1024 * 1024 // 100 MB (Apple TV 4K Gen 1)
+        } else {
+            cache.countLimit = 90
+            cache.totalCostLimit = 60 * 1024 * 1024  // 60 MB (Apple TV HD)
+        }
         #if canImport(UIKit)
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -1842,7 +1938,8 @@ actor PosterDiskCache {
     private static let storageVersion = "v2"
 
     init() {
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         directory = caches.appendingPathComponent("poster_artwork", isDirectory: true)
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
     }
@@ -1927,9 +2024,11 @@ private let posterURLSession: URLSession = {
     config.timeoutIntervalForRequest = 10
     config.timeoutIntervalForResource = 20
     config.httpMaximumConnectionsPerHost = 10
+    let totalRam = ProcessInfo.processInfo.physicalMemory
+    let isLegacyDevice = totalRam <= 2_500_000_000 // <= 2.5 GB (Apple TV HD)
     config.urlCache = URLCache(
-        memoryCapacity: 20 * 1024 * 1024,
-        diskCapacity: 100 * 1024 * 1024,
+        memoryCapacity: isLegacyDevice ? (8 * 1024 * 1024) : (20 * 1024 * 1024),
+        diskCapacity: isLegacyDevice ? (50 * 1024 * 1024) : (100 * 1024 * 1024),
         diskPath: "nuvio_poster_urlcache"
     )
     return URLSession(configuration: config)
@@ -2109,6 +2208,12 @@ struct WatchedCheckmarkBadge: View {
                 // allowing an older result to overwrite a newer watched state.
                 refreshVersion &+= 1
             }
+            .onReceive(NotificationCenter.default.publisher(for: TraktAuthStore.changedNotification).receive(on: RunLoop.main)) { _ in
+                refreshVersion &+= 1
+            }
+            .onReceive(NotificationCenter.default.publisher(for: TraktSettingsStore.continueWatchingChangedNotification).receive(on: RunLoop.main)) { _ in
+                refreshVersion &+= 1
+            }
     }
 
     /// Re-runs the lookup whenever the card's identity changes. Search results
@@ -2135,7 +2240,7 @@ struct WatchedCheckmarkBadge: View {
         }
 
         let snapshot = WatchedStore.currentSnapshot()
-        let isSeries = ["series", "tv", "show", "tvshow"].contains(type.lowercased())
+        let isSeries = meta?.isSeries ?? NuvioMeta.isSeriesType(type)
         guard isSeries else {
             let result = meta.map { snapshot.contains(meta: $0) }
                 ?? snapshot.contains(metaId: metaId, type: type)

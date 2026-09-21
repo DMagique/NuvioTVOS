@@ -355,7 +355,6 @@ struct ExternalPlaybackCallback: Equatable {
     let isError: Bool
     let progress: Double?
     let position: Double?
-    let duration: Double?
 
     static func parse(_ url: URL) -> ExternalPlaybackCallback? {
         guard url.scheme?.lowercased() == "nuvio-tv",
@@ -381,23 +380,8 @@ struct ExternalPlaybackCallback: Equatable {
             id: id,
             isError: isError,
             progress: progress,
-            position: number("position"),
-            duration: number("duration")
+            position: number("position")
         )
-    }
-
-    /// Infuse's current `/play` callback reports an exit position in seconds;
-    /// older builds reported a normalized `progress` fraction. Prefer the
-    /// callback's duration when supplied, then fall back to the runtime Nuvio
-    /// stored with the handoff session.
-    func completionProgress(using fallbackDuration: Double?) -> Double? {
-        if let progress { return progress }
-        guard let position, position.isFinite, position >= 0 else { return nil }
-        let duration = duration ?? fallbackDuration
-        guard let duration, duration.isFinite, duration > 0 else { return nil }
-        let fraction = position / duration
-        guard fraction.isFinite, (0...1).contains(fraction) else { return nil }
-        return fraction
     }
 }
 
@@ -418,7 +402,19 @@ enum ExternalPlaybackSessionStore {
     private static let key = "nuvio.tv.externalPlaybackSession.v1"
 
     static func save(_ session: ExternalPlaybackSession, defaults: UserDefaults = .standard) {
-        guard let data = try? JSONEncoder().encode(session) else { return }
+        // A series meta can carry its entire episode guide. This handoff is a
+        // single-slot preference, so persist the compact form and never send a
+        // full guide to cfprefsd.
+        let compactSession = ExternalPlaybackSession(
+            id: session.id,
+            meta: session.meta.persistenceSnapshot,
+            sourceURL: session.sourceURL,
+            season: session.season,
+            episode: session.episode,
+            duration: session.duration,
+            profileID: session.profileID
+        )
+        guard let data = try? JSONEncoder().encode(compactSession) else { return }
         defaults.set(data, forKey: key)
     }
 
@@ -456,6 +452,9 @@ private extension CharacterSet {
 /// same add-on fetch + smart-stream selection the details screen uses).
 struct PreparedNextStream {
     let url: URL
+    /// Stable torrent file identity for the resolved URL, when the resolver
+    /// can prove the selected file index is unchanged.
+    var cacheFileIdentity: PlaybackCacheFileIdentity? = nil
     /// Per-stream HTTP headers from the add-on's proxy hints.
     var httpHeaders: [String: String] = [:]
     /// The "S1 · E2 · Title" line the player shows and parses episode numbers from.
@@ -468,6 +467,8 @@ struct PreparedNextStream {
     var addonName: String? = nil
     var videoSize: Int64? = nil
     var provider: String? = nil
+    var bingeGroup: String? = nil
+    var artworkURL: URL? = nil
 }
 
 struct PlayerTime: Equatable {

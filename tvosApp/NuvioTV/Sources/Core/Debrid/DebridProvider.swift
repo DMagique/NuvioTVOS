@@ -97,6 +97,8 @@ enum DebridResult: Equatable {
     case stale
     /// Auth failed or an unexpected error — caller should try the next stream.
     case error
+    /// Provider rate limit reached (HTTP 429) — caller should pause and avoid hammering remaining candidates.
+    case rateLimited
 }
 
 /// A single debrid backend (Real-Debrid, Premiumize, …).

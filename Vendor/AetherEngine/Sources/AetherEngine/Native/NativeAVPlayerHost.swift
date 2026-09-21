@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import AVKit
 import Combine
+import CoreImage
 #if os(tvOS) || os(iOS)
 import MediaPlayer
 #endif
@@ -214,6 +215,8 @@ final class NativeAVPlayerHost {
     // MARK: - Private state
 
     private var playerItem: AVPlayerItem?
+    private var videoOutput: AVPlayerItemVideoOutput?
+    private lazy var ciContext = CIContext(options: [.cacheIntermediates: false])
     /// Applied immediately and replayed onto fresh items across internal reloads so Now Playing title/artwork survives audio-switch/background-reopen seams.
     private var pendingExternalMetadata: [AVMetadataItem] = []
     private var timeObserver: Any?
@@ -375,6 +378,10 @@ final class NativeAVPlayerHost {
         var armIngestFallback: Bool = false
         /// #334: the ceiling on silence for a path with no other readiness watchdog.
         var readinessDeadline: Double?
+        /// AE#520: this session stream-copies an EAC3 bitstream that carries JOC. HDMI passthrough
+        /// then tunnels it through a 2-channel MAT carrier, so the route's channel count is not a
+        /// statement about the audio and the surround-downmix warning below must not read it as one.
+        var audioIsAtmosStreamCopy: Bool = false
     }
 
     /// AE#446 round 5: a fresh item is about to attach, invoked before anything can fetch a playlist
@@ -500,6 +507,11 @@ final class NativeAVPlayerHost {
         if armIngestFallback {
             startCarriageProbe(asset: asset, url: url, httpHeaders: httpHeaders)
         }
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+        ])
+        item.add(output)
+        self.videoOutput = output
         playerItem = item
         accessLogCount = 0
         failure = nil
@@ -613,6 +625,9 @@ final class NativeAVPlayerHost {
                         )
                         self.avPlayer.play()
                     }
+                    if self.timeControlStatus == .playing {
+                        self.startLiveJoinImmediatelyIfHolding(waitingReason: "-")
+                    }
                     // #168: publish the item's real dynamic range for the probe-free remote-HLS badge.
                     await self.publishDetectedVideoFormat(from: item)
                     guard self.sessionID == sid else { return }
@@ -676,7 +691,8 @@ final class NativeAVPlayerHost {
                         guard let self = self, let item = self.playerItem else { return }
                         Self.dumpAudioRoute(sid: sid, phase: "settled")
                         await Self.warnIfFLACSurroundExceedsRoute(item, sid: sid)
-                        await Self.warnIfEAC3SurroundOnStereoRoute(item, sid: sid)
+                        await Self.warnIfEAC3SurroundOnStereoRoute(
+                            item, sid: sid, isAtmosStreamCopy: contract.audioIsAtmosStreamCopy)
                         // #168: the video track can be absent from item.tracks at readyToPlay for HLS;
                         // re-read once playing so the remote-HLS badge settles on the real dynamic range.
                         await self.publishDetectedVideoFormat(from: item)
@@ -841,6 +857,18 @@ final class NativeAVPlayerHost {
 
         // Explicit seek prevents AVPlayer from defaulting to the EVENT-playlist live edge. Remote-HLS and loopback live REJOINS set skipInitialSeek (backlog-start seek was the prime suspect for permanent waitingToPlay on rejoin; see LiveReloadPolicy.skipInitialSeek).
         if !skipInitialSeek {
+            // AE#509: name the seek and the axis it is spent on. This is the only unconditional
+            // reposition of a fresh item, it happens before the item can answer for itself, and
+            // nothing logged it: a session parked at an unreachable position looked exactly like a
+            // session that placed nothing. `startPosition` is an ITEM-axis anchor, while a live
+            // host only ever sees the published clock (item + shift), so a live anchor that is not
+            // nil is the one shape where those two axes can be confused.
+            EngineLog.emit(
+                "[NativeAVPlayerHost] #\(sid) mount seek: item axis "
+                + String(format: "%.2f", startPosition ?? 0) + "s "
+                + "(startPosition=\(startPosition.map { String(format: "%.2f", $0) } ?? "nil"), "
+                + "live=\(contract.isLive))",
+                category: .engine)
             // Load-time seek (not a user scrub): no seekInFlight needed; the async seek(to:) carries #37/#38 semantics for user seeks.
             avPlayer.seek(to: CMTime(seconds: startPosition ?? 0, preferredTimescale: 600),
                           toleranceBefore: .zero, toleranceAfter: .zero)
@@ -1217,7 +1245,9 @@ final class NativeAVPlayerHost {
     private func startLiveJoinImmediatelyIfHolding(waitingReason: String) {
         guard liveJoinStartsImmediately, !liveJoinImmediateStartSpent else { return }
         if timeControlStatus == .playing {
-            liveJoinImmediateStartSpent = true
+            if Self.playingSpendsLiveJoinOneShot(itemIsReadyToPlay: playerItem?.status == .readyToPlay) {
+                liveJoinImmediateStartSpent = true
+            }
             return
         }
         // The free guards first, so the reading below is only ever taken on a hold that could actually
@@ -1295,6 +1325,18 @@ final class NativeAVPlayerHost {
             )
             self.avPlayer.playImmediately(atRate: rate)
         }
+    }
+
+    /// Whether a `.playing` transport status is this item's rate rolling, the event that spends the
+    /// AE#440 one-shot.
+    ///
+    /// An in-place swap reuses a player that is still `.playing`, and that status reaches the fresh
+    /// item as its first edge, before the item can play anything. Spent there, the one-shot was gone
+    /// before the join's own `ToMinimizeStalls` hold began, so a #446 rejoin produced no decision and no
+    /// line. An item cannot roll before it is ready, so readiness is what separates the carry from the
+    /// roll. The readyToPlay sink asks again, for a carry that never changes status on its way to motion.
+    nonisolated static func playingSpendsLiveJoinOneShot(itemIsReadyToPlay: Bool) -> Bool {
+        itemIsReadyToPlay
     }
 
     /// AE#440 round 3: what a refused hold did next, reported and never acted on.
@@ -1493,7 +1535,8 @@ final class NativeAVPlayerHost {
             return LiveJoinBufferReading(bufferEmpty: item.isPlaybackBufferEmpty, aheadSeconds: ahead,
                                          playheadSeconds: now,
                                          loadedRangeCount: placement.count,
-                                         nearestRangeOffsetSeconds: placement.nearestOffset)
+                                         nearestRangeOffsetSeconds: placement.nearestOffset,
+                                         itemStatus: item.status)
         }
     }
 
@@ -1508,6 +1551,9 @@ final class NativeAVPlayerHost {
         /// positive when the nearest one STARTS that far ahead, negative when the nearest one ENDED
         /// that far behind. nil when a range contains the playhead, or when there are none.
         var nearestRangeOffsetSeconds: Double? = nil
+        /// AVPlayer's own verdict on the item, read in the same batch as everything above it.
+        /// nil only where a caller builds a reading without one.
+        var itemStatus: AVPlayerItem.Status? = nil
     }
 
     /// AE#447 follow-up: `ahead 0.00s` is two different facts and the line printed one word for both.
@@ -1532,6 +1578,31 @@ final class NativeAVPlayerHost {
         return (usable.count, nearest)
     }
 
+    /// AE#509: the item's own verdict, said out loud by the account that describes the wedge.
+    ///
+    /// `item.status` is otherwise carried by a KVO observer that fires on a CHANGE, so an item that
+    /// never leaves `.unknown` produces no status line at all: the engine is silent about the item in
+    /// exactly the state where the item is the question. A 20 s field wedge arrived with "nothing
+    /// placed" from here and `.unknown` from the host's own private dump, and only the pair of them
+    /// said anything. The two readings point opposite ways: `.unknown` is AVPlayer never accepting the
+    /// media (look at the segment bytes), `.readyToPlay` is an accepted item that places nothing (look
+    /// at the fetch).
+    nonisolated static func liveJoinStatusClause(_ status: AVPlayerItem.Status?) -> String {
+        switch status {
+        case .unknown:
+            return ", and the item's own status has not left unknown, so AVPlayer has not accepted "
+                + "the media at all"
+        case .readyToPlay:
+            return ", on an item AVPlayer has accepted (status readyToPlay)"
+        case .failed:
+            return ", on an item AVPlayer has failed (status failed)"
+        case .none:
+            return ""
+        @unknown default:
+            return ""
+        }
+    }
+
     /// The placement clause the two accounts below carry when the cushion reads zero. nil when a range
     /// contains the playhead: there the depth is the whole story and this would only add noise.
     nonisolated static func liveJoinPlacementClause(reading: LiveJoinBufferReading) -> String? {
@@ -1539,20 +1610,21 @@ final class NativeAVPlayerHost {
         let head = reading.playheadSeconds.isFinite
             ? String(format: "%.2f", reading.playheadSeconds) + "s"
             : "an unreadable position"
+        let status = liveJoinStatusClause(reading.itemStatus)
         if reading.loadedRangeCount == 0 {
             return "the item holds no loaded range at all, so nothing has been placed on its axis "
-                + "since it was mounted (playhead \(head))"
+                + "since it was mounted (playhead \(head))" + status
         }
         guard let offset = reading.nearestRangeOffsetSeconds else {
             // A range does contain the playhead and the depth is simply zero: starved at the edge.
             return "the item holds \(reading.loadedRangeCount) loaded range(s) and the playhead sits "
-                + "inside one of them with nothing ahead of it (playhead \(head))"
+                + "inside one of them with nothing ahead of it (playhead \(head))" + status
         }
         let where_ = offset > 0
             ? "starts \(String(format: "%.2f", offset))s AHEAD of it"
             : "ended \(String(format: "%.2f", -offset))s BEHIND it"
         return "the item holds \(reading.loadedRangeCount) loaded range(s) but none at the playhead: "
-            + "the nearest \(where_) (playhead \(head))"
+            + "the nearest \(where_) (playhead \(head))" + status
     }
 
     func play() {
@@ -1922,6 +1994,10 @@ final class NativeAVPlayerHost {
         playIntent = false
         avPlayer.pause()
         avPlayer.replaceCurrentItem(with: nil)
+        if let videoOutput {
+            playerItem?.remove(videoOutput)
+            self.videoOutput = nil
+        }
         playerItem = nil
         isReady = false
         // AE#443: a fresh load is a fresh session, so the retired items' bytes go with the old one.
@@ -1933,6 +2009,29 @@ final class NativeAVPlayerHost {
         rate = 0
         // The AVAudioSession is NOT released here. Teardown ordering is the engine's call, not the host's:
         // AetherEngine.stopInternal deactivates once every render path is quiesced (#215).
+    }
+
+    /// Captures the most recently decoded video frame directly from the presentation buffer.
+    /// Scaled to `maxWidth` via CoreImage Metal pipeline with 0 extra HTTP reads or decoders.
+    func captureCurrentFrame(maxWidth: Int = 320) -> CGImage? {
+        guard let item = playerItem, let output = videoOutput else { return nil }
+        let time = item.currentTime()
+        guard let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil) else {
+            return nil
+        }
+        let ciImage = CIImage(cvPixelBuffer: buffer)
+        let extent = ciImage.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let scale = min(1.0, CGFloat(maxWidth) / extent.width)
+        let scaledImage: CIImage
+        if scale < 1.0 {
+            scaledImage = ciImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        } else {
+            scaledImage = ciImage
+        }
+
+        return ciContext.createCGImage(scaledImage, from: scaledImage.extent)
     }
 
     /// Dump asset URL + track FourCCs on .failed and asset.load failure; d9b8aa5 added the asset.load path because item.status never went .failed in DrHurt's P5 MKV session.
@@ -2230,6 +2329,10 @@ final class NativeAVPlayerHost {
     /// format instead of the `.sdr` default. Called at readyToPlay and again at first `.playing` (an HLS
     /// video track can be absent from `item.tracks` at the readyToPlay instant). No-op for the item once it
     /// has been replaced; leaves `detectedVideoFormat` nil while no video track resolves (audio-only black).
+    ///
+    /// AE#515: this runs on every native session, the loopback route included, where the engine reads it
+    /// as a Dolby Vision label upgrade rather than as the format itself. The line used to name itself
+    /// `remote-HLS` on both, which cost a reporter time on a log where the route was the question.
     @MainActor
     private func publishDetectedVideoFormat(from item: AVPlayerItem) async {
         let sid = sessionID
@@ -2249,7 +2352,7 @@ final class NativeAVPlayerHost {
             if detectedVideoFormat != fmt {
                 detectedVideoFormat = fmt
                 EngineLog.emit(
-                    "[NativeAVPlayerHost] #\(sessionID) remote-HLS videoFormat=\(fmt) "
+                    "[NativeAVPlayerHost] #\(sessionID) item videoFormat=\(fmt) "
                     + "subType='\(fourccString(subType))' transfer=\(transfer ?? "nil") "
                     + "rate=\(rate.map { String(format: "%.3f", $0) } ?? "nil")",
                     category: .engine
@@ -2346,9 +2449,21 @@ final class NativeAVPlayerHost {
         #endif
     }
 
-    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Atmos excluded (ch=2 MAT carrier is correct for Atmos passthrough). Cause: Sonos Arc reports ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline bug (dec3 bitstream is identical across runs).
-    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int) async {
+    /// Warn when EAC3/AC3 multichannel plays into a stereo-only HDMI route. Cause: Sonos Arc reports
+    /// ch=2 LPCM after boot or HDMI handshake glitch; fix is power-cycling the sink. Not a pipeline
+    /// bug (dec3 bitstream is identical across runs).
+    ///
+    /// AE#520: Atmos is excluded, and until this the exclusion existed only in the docstring and in
+    /// the warning's own closing sentence. Every EAC3+JOC session matches the condition by
+    /// construction, because a 6-channel `ec-3` track tunnelling through a 2-channel MAT carrier is
+    /// what correct Atmos passthrough looks like, so the line fired on exactly the sessions it then
+    /// told the reader to ignore it for. The reporter had to reason it away himself while chasing a
+    /// real defect. The route cannot answer this (a MAT carrier and a stereo LPCM route both report
+    /// two channels); the session can, and now says so through the contract.
+    private static func warnIfEAC3SurroundOnStereoRoute(_ item: AVPlayerItem, sid: Int,
+                                                        isAtmosStreamCopy: Bool) async {
         #if os(iOS) || os(tvOS)
+        guard !isAtmosStreamCopy else { return }
         var trackChannels: Int = 0
         var codecID: String = ""
         for itemTrack in item.tracks {

@@ -144,6 +144,9 @@ enum SettingsKey {
     /// rows by this; kept separate from `homeCatalogOrder` (the local tvOS
     /// reorder) so a pull never disturbs the built-in rows or a local reorder.
     static let homeCatalogSyncedOrder = "nuvio.tv.settings.layout.homeCatalogSyncedOrder"
+    /// JSON `[String: String]` of catalog key (`<addonId>_<type>_<catalogId>`) → custom display title
+    /// synced from the webapp or Android app.
+    static let homeCatalogCustomTitles = "nuvio.tv.settings.layout.homeCatalogCustomTitles"
     static let homeCatalogShowType = "nuvio.tv.settings.layout.homeCatalogShowType"
     static let heroEnabled = "nuvio.tv.settings.layout.heroEnabled"
     /// JSON `[String]` of Home section ids selected as Grid View hero sources.
@@ -206,6 +209,11 @@ enum SettingsKey {
     static let debridProvider = "nuvio.tv.settings.integrations.debridProvider"
     static let debridApiKey = "nuvio.tv.settings.integrations.debridApiKey"
     static let debridEnabled = "nuvio.tv.settings.integrations.debridEnabled"
+    static let p2pEnabled = "nuvio.tv.settings.integrations.p2pEnabled"
+    /// Device/profile-local acknowledgement for direct peer-to-peer playback.
+    static let p2pConsentAccepted = "nuvio.tv.settings.integrations.p2pConsentAccepted"
+    static let p2pHideTorrentStats = "nuvio.tv.settings.integrations.p2pHideTorrentStats"
+    static let p2pCacheLimitGB = "nuvio.tv.settings.integrations.p2pCacheLimitGB"
     static let cloudLibraryEnabled = "nuvio.tv.settings.integrations.cloudLibraryEnabled"
     /// Provider-specific device-flow tokens. Keeping them separate matches the
     /// Android TV debrid screen so multiple providers can stay linked.
@@ -237,6 +245,7 @@ enum SettingsKey {
     static let jellyfinLocalRowEnabled = "nuvio.tv.settings.integrations.jellyfinLocalRowEnabled"
 
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
+    static let trickplayServer = "nuvio.tv.settings.playback.trickplayServer"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
     static let smartStreamUseTopResult = "nuvio.tv.settings.playback.smartStreamUseTopResult"
@@ -251,6 +260,8 @@ enum SettingsKey {
     static let streamBadgePlacement = "nuvio.tv.settings.playback.streamBadgePlacement"
     static let autoPlayNext = "nuvio.tv.settings.playback.autoPlayNext"
     static let autoPlayNextCountdown = "nuvio.tv.settings.playback.autoPlayNextCountdown"
+    static let streamAutoPlayPreferBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayPreferBingeGroup"
+    static let streamAutoPlayReuseBingeGroup = "nuvio.tv.settings.playback.streamAutoPlayReuseBingeGroup"
     static let postPlayRecommendationsEnabled = "nuvio.tv.settings.playback.postPlayRecommendationsEnabled"
     static let trailersEnabled = "nuvio.tv.settings.playback.trailersEnabled"
     static let trailerPreviewSound = "nuvio.tv.settings.playback.trailerPreviewSound"
@@ -266,6 +277,8 @@ enum SettingsKey {
     static let subtitleSize = "nuvio.tv.settings.playback.subtitleSize"
     static let frameRateMatching = "nuvio.tv.settings.playback.frameRateMatching"
     static let networkCache = "nuvio.tv.settings.playback.networkCache"
+    static let hybridDiskCacheEnabled = "nuvio.tv.settings.playback.hybridDiskCacheEnabled"
+    static let hybridDiskCacheLimitGB = "nuvio.tv.settings.playback.hybridDiskCacheLimitGB"
     static let playbackTrackSelections = "nuvio.tv.settings.playback.trackSelections"
     static let externalPlayerForwardSubtitles = "nuvio.tv.settings.playback.externalPlayerForwardSubtitles"
     static let assOverrideMode = "nuvio.tv.settings.playback.assOverrideMode"
@@ -273,6 +286,7 @@ enum SettingsKey {
     static let playerShowEpisodes = "nuvio.tv.settings.playback.showEpisodes"
     static let playerShowSources = "nuvio.tv.settings.playback.showSources"
     static let playerShowSubtitles = "nuvio.tv.settings.playback.showSubtitles"
+    static let seekPreviewEnabled = "nuvio.tv.settings.playback.seekPreviewEnabled"
 
     static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
     static let smoothFocus = "nuvio.tv.settings.advanced.smoothFocus"
@@ -283,17 +297,18 @@ enum SettingsKey {
     static let iCloudLastSyncDate = "nuvio.tv.settings.advanced.iCloudLastSyncDate"
     static let simklAccessToken = "nuvio.tv.settings.integrations.simklAccessToken"
 
-    /// API app credentials must remain on the Apple TV and never enter the
-    /// account settings payload.
+    /// Credentials and device acknowledgements must remain on this Apple TV
+    /// and never enter the account settings payload.
     static let deviceLocal = Set([
-        traktClientID, traktClientSecret, simklClientID, aiSubtitlesGeminiAPIKey
+        traktConnected, traktClientID, traktClientSecret, simklClientID, aiSubtitlesGeminiAPIKey,
+        p2pConsentAccepted, iCloudSyncEnabled, iCloudLastSyncDate
     ])
 
     static let all = [
         profileName, profilePinEnabled, profileAutoSelectLast, profileRequireSelectionAfterBackground,
         accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
-        homeLayout, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, discoverLocation,
+        homeLayout, homeCatalogShowType, heroEnabled, heroCatalogs, fullscreenHeroBackdrop, posterLabels, catalogAddonNames, discoverLocation,
         searchStyle,
         continueWatchingSort, upNextFromFurthestEpisode, showUnairedNextUp,
         cardCornerRadius, cardSize, liquidGlassCards,
@@ -310,22 +325,27 @@ enum SettingsKey {
         mdbListEnabled, mdbListApiKey, mdbListUseImdb, mdbListUseTmdb,
         mdbListUseTomatoes, mdbListUseMetacritic, mdbListUseTrakt,
         mdbListUseLetterboxd, mdbListUseAudience,
-        debridProvider, debridApiKey, debridEnabled, cloudLibraryEnabled,
+        debridProvider, debridApiKey, debridEnabled, p2pEnabled, p2pConsentAccepted,
+        p2pHideTorrentStats, p2pCacheLimitGB, cloudLibraryEnabled,
         torboxAccessToken, premiumizeAccessToken, realDebridAccessToken,
         aiSubtitlesEnabled, aiSubtitlesProvider, aiSubtitlesGeminiAPIKey, aiSubtitlesGeminiModel,
         aiSubtitlesOpenRouterModel,
         aiSubtitlesTargetLanguage, aiSubtitlesAutoSelect, aiSubtitlesStripHearingImpaired,
         streamAddonManifestURL, streamAddonManifestURLs,
         streamAddonManifestStates,
-        playerEngine, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
+        cinemetaDisabled, deletedLocalAddons,
+        smbServers, smbLibraryIndex, smbLocalRowEnabled,
+        jellyfinServers, jellyfinLibraryIndex, jellyfinLocalRowEnabled,
+        playerEngine, trickplayServer, externalPlayer, smartStreamSelection, smartStreamUseTopResult, smartStreamQuality, smartSubtitleMatching,
         cachedOnlyStreams, preferHardwareDecodedStreams, streamSortOption, streamBadgeRules, showFileSizeBadges, showAddonLogo, streamBadgePlacement,
-        autoPlayNext, autoPlayNextCountdown, postPlayRecommendationsEnabled, trailersEnabled, trailerPreviewSound, trailerDelay,
+        autoPlayNext, autoPlayNextCountdown, streamAutoPlayPreferBingeGroup, streamAutoPlayReuseBingeGroup, postPlayRecommendationsEnabled, trailersEnabled, trailerPreviewSound, trailerDelay,
         focusedPosterBackdropEnabled, focusedPosterBackdropDelay, audioLanguage,
         subtitleLanguages, subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
-        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, playbackTrackSelections,
+        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, hybridDiskCacheEnabled, hybridDiskCacheLimitGB, playbackTrackSelections,
         externalPlayerForwardSubtitles, assOverrideMode,
-        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles,
-        fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter
+        playerShowPiP, playerShowEpisodes, playerShowSources, playerShowSubtitles, seekPreviewEnabled,
+        fastNavigation, smoothFocus, playbackDiagnostics, playbackDebug, focusHighlighter,
+        iCloudSyncEnabled, iCloudLastSyncDate
     ] + SubtitleStyleKey.all
 }
 
@@ -1463,9 +1483,9 @@ private struct SettingsCategoryPillBackground: ViewModifier {
         if isFocused {
             content.background(Color.white, in: Capsule())
         } else if isSelected {
-            content.settingsGlass(shape: Capsule(), isProminent: true)
+            content.background(Color.white.opacity(0.14), in: Capsule())
         } else {
-            content.settingsGlass(shape: Capsule(), isProminent: false)
+            content.background(Color.white.opacity(0.06), in: Capsule())
         }
     }
 }
@@ -1485,11 +1505,12 @@ private struct AccountSettingsView: View {
     let onPresentPin: (ProfilePinSheetMode) -> Void
 
     @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
-    @AppStorage(SettingsKey.profileAutoSelectLast) private var autoSelectLastProfile = true
-    @AppStorage(SettingsKey.profileRequireSelectionAfterBackground)
+    @AppStorage(SettingsKey.profileAutoSelectLast, store: .standard) private var autoSelectLastProfile = true
+    @AppStorage(SettingsKey.profileRequireSelectionAfterBackground, store: .standard)
     private var requireProfileSelectionAfterBackground = false
     @AppStorage(SettingsKey.accountSyncWatchState) private var syncWatchState = true
-    @AppStorage(SettingsKey.iCloudSyncEnabled) private var iCloudSyncEnabled = false
+    @AppStorage(SettingsKey.iCloudSyncEnabled, store: .standard) private var iCloudSyncEnabled = false
+    @ObservedObject private var iCloudSyncManager = ICloudSettingsSyncManager.shared
     @State private var editableProfileName = ""
     @State private var showingAvatarPicker = false
 
@@ -1615,8 +1636,6 @@ private struct AccountSettingsView: View {
                     isOn: $requireProfileSelectionAfterBackground,
                     accentColor: accentColor
                 )
-                .opacity(!autoSelectLastProfile ? 1 : 0.46)
-                .disabled(autoSelectLastProfile)
             }
 
             SettingsGroup(
@@ -1666,6 +1685,28 @@ private struct AccountSettingsView: View {
                     isOn: $iCloudSyncEnabled,
                     accentColor: accentColor
                 )
+
+                if iCloudSyncEnabled {
+                    SettingsActionRow(
+                        title: L10n.string("tvos_settings_icloud_sync_now", fallback: "Sync Now"),
+                        subtitle: L10n.string(
+                            "tvos_settings_icloud_sync_now_subtitle",
+                            fallback: "Push and pull the latest settings to and from iCloud"
+                        ),
+                        value: L10n.string("action_sync", fallback: "Sync"),
+                        accentColor: accentColor,
+                        action: {
+                            ICloudSettingsSyncManager.shared.syncNow()
+                        }
+                    )
+
+                    if let lastSync = iCloudSyncManager.lastSyncDate {
+                        SettingsInfoRow(
+                            title: L10n.string("tvos_settings_icloud_last_sync", fallback: "Last iCloud Sync"),
+                            value: DateFormatter.localizedString(from: lastSync, dateStyle: .short, timeStyle: .medium)
+                        )
+                    }
+                }
 
                 if isAuthenticated {
                     if sessionNeedsReauthentication {
@@ -1728,6 +1769,9 @@ private struct AccountSettingsView: View {
                     onChangeProfileAvatar?(profile.id, avatarId)
                 }
             }
+        }
+        .onChange(of: iCloudSyncEnabled) { _, newValue in
+            ICloudSettingsSyncManager.shared.isEnabled = newValue
         }
     }
 
@@ -2135,7 +2179,9 @@ private struct AppearanceSettingsView: View {
             if languageTag != resolved.tag {
                 languageTag = resolved.tag
             }
-            localeManager.applyStoredTag(languageTag)
+            if languageTag != localeManager.language.tag {
+                localeManager.applyStoredTag(languageTag)
+            }
         }
         .onChange(of: languageTag) { _, newValue in
             localeManager.applyStoredTag(newValue)
@@ -2224,12 +2270,18 @@ private struct CardStyleLivePreview: View {
                     }
                     .frame(width: 140, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: portraitRadius, style: .continuous))
-                    .modifier(
-                        LiquidGlassCardModifier(
-                            cornerRadius: portraitRadius,
-                            isFocused: true,
-                            isEnabled: isLiquidGlass
-                        )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
+                            .strokeBorder(
+                                isLiquidGlass
+                                    ? LinearGradient(
+                                        colors: [Color.white.opacity(0.55), Color.white.opacity(0.20), Color.white.opacity(0.35)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                    : LinearGradient(colors: [Color.clear], startPoint: .top, endPoint: .bottom),
+                                lineWidth: 1.5
+                            )
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: portraitRadius, style: .continuous)
@@ -2272,7 +2324,7 @@ private struct CardStyleLivePreview: View {
                                         if isLiquidGlass {
                                             Capsule()
                                                 .fill(Color.white.opacity(0.18))
-                                                .modifier(LiquidGlassBadgeModifier(cornerRadius: 12))
+                                                .overlay(Capsule().strokeBorder(Color.white.opacity(0.30), lineWidth: 1))
                                         } else {
                                             Capsule().fill(Color.black.opacity(0.60))
                                         }
@@ -2315,12 +2367,18 @@ private struct CardStyleLivePreview: View {
                     }
                     .frame(width: 340, height: 210)
                     .clipShape(RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous))
-                    .modifier(
-                        LiquidGlassCardModifier(
-                            cornerRadius: landscapeRadius,
-                            isFocused: true,
-                            isEnabled: isLiquidGlass
-                        )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: landscapeRadius, style: .continuous)
+                            .strokeBorder(
+                                isLiquidGlass
+                                    ? LinearGradient(
+                                        colors: [Color.white.opacity(0.55), Color.white.opacity(0.20), Color.white.opacity(0.35)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                    : LinearGradient(colors: [Color.clear], startPoint: .top, endPoint: .bottom),
+                                lineWidth: 1.5
+                            )
                     )
                 }
             }
@@ -2532,7 +2590,7 @@ private struct HomeLayoutLivePreview: View {
     private var heroDetailsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             // Glowing stylized title logo
-            Text("OBSESSION")
+            Text("DUNE: PART TWO")
                 .font(.system(size: 24, weight: .black, design: .rounded))
                 .foregroundStyle(
                     LinearGradient(
@@ -2544,13 +2602,13 @@ private struct HomeLayoutLivePreview: View {
 
             // Metadata line
             HStack(spacing: 5) {
-                Text("Movie · Horror · 1h 49m · May 15, 2026 · IMDb 7.9")
+                Text("Movie · Sci-Fi · 2h 46m · Mar 1, 2024 · IMDb 8.6")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundColor(.white.opacity(0.70))
             }
 
             // Multi-line synopsis
-            Text("After breaking the mysterious \"One Wish Willow\" to win his crush's heart, a hopeless romantic finds himself getting exactly what he asked for but soon discovers that some desires come at a dark, sinister price.")
+            Text("Paul Atreides unites with Chani and the Fremen while seeking revenge against the conspirators who destroyed his family.")
                 .font(.system(size: 7.8, weight: .regular))
                 .foregroundColor(.white.opacity(0.68))
                 .lineLimit(2)
@@ -2633,7 +2691,7 @@ private struct HomeLayoutLivePreview: View {
                         )
 
                         if posterLabels {
-                            Text("Obsession")
+                            Text("Dune: Part Two")
                                 .font(.system(size: 7.5, weight: .bold))
                                 .foregroundColor(.white)
                                 .lineLimit(1)
@@ -2794,7 +2852,7 @@ private struct LayoutDiscoverySettingsView: View {
     // Search is the only screen that currently hosts the full Discover surface.
     // Do not offer Home/Library as dead selections that merely hide Discover.
     private let discoverLocations = ["Search", "Off"]
-    private let searchStyles = ["Netflix", "Classic", "Native"]
+    private let searchStyles = ["Netflix", "Classic", "Native", "Grid"]
     private let continueWatchingSorts = ["Default", "Streaming Style", "Separate Upcoming Row"]
 
     var body: some View {
@@ -2860,6 +2918,8 @@ private struct LayoutDiscoverySettingsView: View {
                     isOn: $fullscreenHeroBackdrop,
                     accentColor: accentColor
                 )
+                .opacity(heroEnabled ? 1 : 0.46)
+                .disabled(!heroEnabled)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_layout_poster_labels", fallback: "Poster Labels"),
@@ -2939,7 +2999,7 @@ private struct LayoutDiscoverySettingsView: View {
                     title: L10n.string("tvos_layout_search_style", fallback: "Search Style"),
                     subtitle: L10n.string(
                         "tvos_layout_search_style_subtitle",
-                        fallback: "Netflix uses the built-in tvOS keyboard with a title list beside the posters; Classic uses the system keyboard over a full-width grid; Native uses the built-in tvOS single-row keyboard"
+                        fallback: "Netflix uses the built-in tvOS keyboard with a title list beside the posters; Classic uses the system keyboard over a full-width grid; Native uses the single-row linear keyboard; Grid uses the native side-by-side multi-row grid keyboard"
                     ),
                     selection: $searchStyle,
                     options: searchStyles,
@@ -3205,24 +3265,28 @@ private func layoutVisibleHomeCatalogRows() -> [TVHomeCatalogOrder.SnapshotRow] 
         ]
         let existingIDs = Set(merged.map(\.id))
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+        let customTitles = TVHomeCatalogOrder.customCatalogTitles()
         for row in simklBuiltIns where !existingIDs.contains(row.id) {
+            let key = TVHomeCatalogOrder.catalogSettingsKey(
+                addonId: "simkl",
+                contentType: row.type,
+                catalogId: row.catalogId
+            )
             merged.append(
                 TVHomeCatalogOrder.SnapshotRow(
                     id: row.id,
                     title: TVHomeCatalogOrder.catalogDisplayTitle(
                         row.title,
                         contentType: row.type,
-                        showType: showType
+                        showType: showType,
+                        addonName: "Simkl",
+                        customTitle: customTitles[key]
                     ),
                     addonName: "Simkl",
                     addonId: "simkl",
                     contentType: row.type,
                     catalogId: row.catalogId,
-                    settingsKey: TVHomeCatalogOrder.catalogSettingsKey(
-                        addonId: "simkl",
-                        contentType: row.type,
-                        catalogId: row.catalogId
-                    )
+                    settingsKey: key
                 )
             )
         }
@@ -3261,6 +3325,7 @@ private struct IntegrationSettingsView: View {
 
     @StateObject private var traktViewModel: TraktSettingsViewModel
     @StateObject private var simklViewModel: SimklSettingsViewModel
+    @StateObject private var mdbListViewModel: MdbListSettingsViewModel
     @AppStorage private var traktClientID: String
     @AppStorage private var traktClientSecret: String
     @AppStorage private var simklClientID: String
@@ -3279,14 +3344,22 @@ private struct IntegrationSettingsView: View {
     @AppStorage(SettingsKey.premiumizeAccessToken) private var premiumizeAccessToken = ""
     @AppStorage(SettingsKey.realDebridAccessToken) private var realDebridAccessToken = ""
     @AppStorage(SettingsKey.aiSubtitlesEnabled) private var aiSubtitlesEnabled = false
+    @AppStorage private var p2pEnabled: Bool
+    @AppStorage private var p2pConsentAccepted: Bool
+    @AppStorage private var p2pHideTorrentStats: Bool
+    @AppStorage private var p2pCacheLimitGB: Int
+    @State private var currentCacheSizeText: String = TorrentSettings.cacheSizeFormatted()
     @State private var debridAccountToConnect: DebridAccountProvider?
     @State private var showingTraktLogin = false
     @State private var showingTraktSettings = false
     @State private var showingSimklLogin = false
     @State private var showingSimklSettings = false
+    @State private var showingMdbListLogin = false
+    @State private var showingMdbListSettings = false
     @State private var showingTmdbOptions = false
     @State private var showingMdbListOptions = false
     @State private var showingAISubtitleOptions = false
+    @State private var showingP2PConsent = false
     @StateObject private var debridConnection = DebridAccountConnectionViewModel()
 
     init(accentColor: Color, profileID: String?) {
@@ -3302,6 +3375,9 @@ private struct IntegrationSettingsView: View {
         )
         _simklViewModel = StateObject(
             wrappedValue: SimklSettingsViewModel(store: profileStore, profileScope: profileScope)
+        )
+        _mdbListViewModel = StateObject(
+            wrappedValue: MdbListSettingsViewModel(store: profileStore, profileScope: profileScope)
         )
         _traktClientID = AppStorage(
             wrappedValue: "",
@@ -3321,6 +3397,26 @@ private struct IntegrationSettingsView: View {
         _traktClientIDDraft = State(initialValue: storedTraktClientID)
         _traktClientSecretDraft = State(initialValue: storedTraktClientSecret)
         _simklClientIDDraft = State(initialValue: storedSimklClientID)
+        _p2pEnabled = AppStorage(
+            wrappedValue: false,
+            SettingsKey.p2pEnabled,
+            store: profileStore
+        )
+        _p2pConsentAccepted = AppStorage(
+            wrappedValue: false,
+            SettingsKey.p2pConsentAccepted,
+            store: profileStore
+        )
+        _p2pHideTorrentStats = AppStorage(
+            wrappedValue: false,
+            SettingsKey.p2pHideTorrentStats,
+            store: profileStore
+        )
+        _p2pCacheLimitGB = AppStorage(
+            wrappedValue: 10,
+            SettingsKey.p2pCacheLimitGB,
+            store: profileStore
+        )
     }
 
     var body: some View {
@@ -3335,7 +3431,11 @@ private struct IntegrationSettingsView: View {
                     title: L10n.string("tvos_settings_simkl_client_id_title", fallback: "Simkl Client ID"),
                     subtitle: L10n.string("tvos_settings_simkl_client_id_subtitle", fallback: "Create an API app at simkl.com/settings/developer — stored only on this Apple TV"),
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
-                    text: $simklClientIDDraft
+                    text: $simklClientIDDraft,
+                    onCommit: {
+                        simklClientID = simklClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        simklViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsInfoRow(title: L10n.string("tvos_settings_simkl_redirect_uri", fallback: "Simkl Redirect URI"), value: SimklConfig.redirectURI)
@@ -3360,7 +3460,11 @@ private struct IntegrationSettingsView: View {
                     title: "Trakt Client ID",
                     subtitle: "Create an API app at trakt.tv/oauth/applications",
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
-                    text: $traktClientIDDraft
+                    text: $traktClientIDDraft,
+                    onCommit: {
+                        traktClientID = traktClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        traktViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsTextFieldRow(
@@ -3371,7 +3475,11 @@ private struct IntegrationSettingsView: View {
                     ),
                     placeholder: L10n.string("debrid_not_set", fallback: "Not set"),
                     text: $traktClientSecretDraft,
-                    isSecure: true
+                    isSecure: true,
+                    onCommit: {
+                        traktClientSecret = traktClientSecretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        traktViewModel.credentialsDidChange()
+                    }
                 )
 
                 SettingsInfoRow(title: "Trakt Redirect URI", value: TraktConfig.redirectURI)
@@ -3382,6 +3490,40 @@ private struct IntegrationSettingsView: View {
                     credentialsReady: traktCredentialsReady,
                     onStartLogin: connectTrakt,
                     onOpenSettings: { showingTraktSettings = true }
+                )
+            }
+
+            SettingsGroup(
+                title: L10n.string("settings_mdblist_title", fallback: "MDBList (Watch Progress & Scrobble)"),
+                subtitle: L10n.string(
+                    "tvos_settings_mdblist_tracking_subtitle",
+                    fallback: "Sync playback, watched history, and Continue Watching with your MDBList account"
+                )
+            ) {
+                MdbListConnectionSettingsCard(
+                    viewModel: mdbListViewModel,
+                    accentColor: accentColor,
+                    onStartLogin: connectMdbList,
+                    onOpenSettings: { showingMdbListSettings = true }
+                )
+            }
+
+            SettingsGroup(
+                title: L10n.string("tvos_settings_watch_progress_title", fallback: "Watch Progress"),
+                subtitle: L10n.string(
+                    "tvos_settings_watch_progress_subtitle",
+                    fallback: "Choose the single service that owns Resume, Continue Watching, and watched updates"
+                )
+            ) {
+                SettingsChoiceRow(
+                    title: L10n.string("trakt_watch_progress_dialog_title", fallback: "Watch Progress"),
+                    subtitle: L10n.string(
+                        "tvos_settings_choose_the_source_for_resume_and_continu_53af657c",
+                        fallback: "Choose the source for Resume, Continue Watching, and watched updates"
+                    ),
+                    selection: globalWatchProgressSelection,
+                    options: RemoteTrackingState.availableProgressSources().map(\.label),
+                    accentColor: accentColor
                 )
             }
 
@@ -3416,8 +3558,8 @@ private struct IntegrationSettingsView: View {
                 }
 
                 SettingsActionRow(
-                    title: L10n.string("settings_mdblist_title", fallback: "MDBList"),
-                    subtitle: L10n.string("tvos_settings_mdblist_integration_subtitle", fallback: "Get a free API key at mdblist.com/preferences"),
+                    title: L10n.string("settings_mdblist_ratings_title", fallback: "MDBList Ratings & Badges (API Key)"),
+                    subtitle: L10n.string("tvos_settings_mdblist_integration_subtitle", fallback: "Get a free API key at mdblist.com/preferences for ratings and artwork badges"),
                     value: mdbListEnabled && mdbListHasApiKey ? L10n.string("tvos_common_on", fallback: "On") : L10n.string("settings_open", fallback: "Open"),
                     accentColor: accentColor
                 ) {
@@ -3491,15 +3633,78 @@ private struct IntegrationSettingsView: View {
                 }
             }
 
+            SettingsGroup(
+                title: L10n.string("tvos_settings_p2p_title", fallback: "P2P BitTorrent"),
+                subtitle: L10n.string("tvos_settings_p2p_subtitle", fallback: "Embedded client for raw torrent streams (Torrentio, TPB+)")
+            ) {
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_p2p_enabled_title", fallback: "P2P Torrent Streaming"),
+                    subtitle: L10n.string("tvos_settings_p2p_enabled_subtitle", fallback: "Stream raw torrents directly on Apple TV without an external server or Debrid."),
+                    isOn: p2pToggleBinding,
+                    accentColor: accentColor
+                )
+
+                if p2pIsEnabled {
+                    SettingsToggleRow(
+                        title: L10n.string("tvos_settings_p2p_hide_stats_title", fallback: "Hide Swarm Stats"),
+                        subtitle: L10n.string("tvos_settings_p2p_hide_stats_subtitle", fallback: "Hide live peer/seed count and download speeds during buffering and playback."),
+                        isOn: $p2pHideTorrentStats,
+                        accentColor: accentColor
+                    )
+
+                    SettingsStepperRow(
+                        title: L10n.string("tvos_settings_p2p_cache_limit_title", fallback: "Cache Storage Limit"),
+                        subtitle: L10n.string("tvos_settings_p2p_cache_limit_subtitle", fallback: "Maximum disk storage allocated for buffering and cached torrent chunks."),
+                        value: $p2pCacheLimitGB,
+                        range: 2...40,
+                        step: 2,
+                        suffix: " GB",
+                        accentColor: accentColor
+                    )
+
+                    SettingsActionRow(
+                        title: L10n.string("tvos_settings_p2p_clear_cache_title", fallback: "Clear Torrent Cache"),
+                        subtitle: L10n.string("tvos_settings_p2p_clear_cache_subtitle", fallback: "Delete cached torrent chunks from disk."),
+                        value: currentCacheSizeText,
+                        accentColor: accentColor
+                    ) {
+                        TorrentSettings.clearCache()
+                        currentCacheSizeText = TorrentSettings.cacheSizeFormatted()
+                    }
+                }
+            }
+
             SMBSettingsSection(accentColor: accentColor)
 
             JellyfinSettingsSection(accentColor: accentColor)
         }
         .onAppear {
+            currentCacheSizeText = TorrentSettings.cacheSizeFormatted()
+            RemoteTrackingState.normalizeWatchProgressSource()
+            RemoteTrackingState.normalizeLibrarySource()
+            RemoteTrackingState.normalizeMoreLikeThisSource()
             traktViewModel.reload()
             traktViewModel.loadConnectedData()
             simklViewModel.reload()
             simklViewModel.loadConnectedData()
+            mdbListViewModel.reload()
+        }
+        .alert(
+            L10n.string("tvos_settings_p2p_consent_title", fallback: "P2P Torrent Streaming"),
+            isPresented: $showingP2PConsent
+        ) {
+            Button(L10n.string("tvos_settings_p2p_consent_enable", fallback: "Enable P2P")) {
+                p2pConsentAccepted = true
+                p2pEnabled = true
+            }
+            Button(L10n.string("tvos_settings_p2p_consent_cancel", fallback: "Cancel"), role: .cancel) {
+                p2pEnabled = false
+            }
+        } message: {
+            Text(L10n.string(
+                "tvos_settings_p2p_consent_message",
+                fallback: "P2P connects directly to other peers. Your public IP address may be visible to them, and your device may upload data. Enable this only for content you have the legal right to access."
+            ))
         }
         .onChange(of: tmdbApiKey) { _, _ in
             if !tmdbHasApiKey {
@@ -3549,6 +3754,19 @@ private struct IntegrationSettingsView: View {
             SimklConnectedSettingsSheet(viewModel: simklViewModel, accentColor: accentColor)
                 .modifier(ClearPresentationBackgroundIfAvailable())
         }
+        .sheet(isPresented: $showingMdbListLogin, onDismiss: {
+            mdbListViewModel.reload()
+            if mdbListViewModel.mode == .connected {
+                showingMdbListSettings = true
+            }
+        }) {
+            MdbListDeviceLoginSheet(viewModel: mdbListViewModel, accentColor: accentColor)
+                .modifier(ClearPresentationBackgroundIfAvailable())
+        }
+        .sheet(isPresented: $showingMdbListSettings) {
+            MdbListConnectedSettingsSheet(viewModel: mdbListViewModel, accentColor: accentColor)
+                .modifier(ClearPresentationBackgroundIfAvailable())
+        }
         .sheet(isPresented: $showingTmdbOptions) {
             TmdbOptionsSheet(accentColor: accentColor)
                 .modifier(ClearPresentationBackgroundIfAvailable())
@@ -3567,6 +3785,9 @@ private struct IntegrationSettingsView: View {
         .onChange(of: simklViewModel.mode) { _, mode in
             if mode == .connected { showingSimklLogin = false }
         }
+        .onChange(of: mdbListViewModel.mode) { _, mode in
+            if mode == .connected { showingMdbListLogin = false }
+        }
         .onChange(of: debridProvider) { _, newKind in
             guard let kind = DebridProviderKind(rawValue: newKind) else { return }
             switch kind {
@@ -3580,10 +3801,53 @@ private struct IntegrationSettingsView: View {
                 break
             }
         }
+        .onChange(of: traktClientIDDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if traktClientID != trimmed {
+                traktClientID = trimmed
+                traktViewModel.credentialsDidChange()
+            }
+        }
+        .onChange(of: traktClientSecretDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if traktClientSecret != trimmed {
+                traktClientSecret = trimmed
+                traktViewModel.credentialsDidChange()
+            }
+        }
+        .onChange(of: simklClientIDDraft) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if simklClientID != trimmed {
+                simklClientID = trimmed
+                simklViewModel.credentialsDidChange()
+            }
+        }
     }
 
     private var hasAnyDebridConnected: Bool {
         !connectedProviders.isEmpty
+    }
+
+    private var p2pIsEnabled: Bool {
+        p2pEnabled && p2pConsentAccepted
+    }
+
+    private var p2pToggleBinding: Binding<Bool> {
+        Binding(
+            get: { p2pIsEnabled },
+            set: { enabled in
+                if enabled {
+                    if p2pConsentAccepted {
+                        p2pEnabled = true
+                    } else {
+                        p2pEnabled = false
+                        showingP2PConsent = true
+                    }
+                } else {
+                    p2pEnabled = false
+                }
+            }
+        )
     }
 
     private var connectedProviders: [DebridAccountProvider] {
@@ -3624,6 +3888,17 @@ private struct IntegrationSettingsView: View {
         !simklClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var globalWatchProgressSelection: Binding<String> {
+        Binding(
+            get: { TraktSettingsStore.watchProgressSource.label },
+            set: { label in
+                TraktSettingsStore.markWatchProgressSourceChosenByUser()
+                TraktSettingsStore.watchProgressSource =
+                    TraktWatchProgressSource.allCases.first { $0.label == label } ?? .nuvioSync
+            }
+        )
+    }
+
     private func connectTrakt() {
         traktClientID = traktClientIDDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         traktClientSecret = traktClientSecretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3637,6 +3912,11 @@ private struct IntegrationSettingsView: View {
         simklViewModel.credentialsDidChange()
         guard simklViewModel.credentialsConfigured else { return }
         showingSimklLogin = true
+    }
+
+    private func connectMdbList() {
+        mdbListViewModel.reload()
+        showingMdbListLogin = true
     }
 }
 
@@ -4679,8 +4959,8 @@ private struct TraktConnectedSettingsSheet: View {
                     }
 
                     SettingsGroup(
-                        title: L10n.string("tvos_settings_cached", fallback: "Cached"),
-                        subtitle: L10n.string("tvos_settings_trakt_cached_subtitle", fallback: "Watched activity currently loaded from your Trakt account")
+                        title: L10n.string("tvos_settings_watch_stats", fallback: "Watch Stats"),
+                        subtitle: L10n.string("tvos_settings_trakt_watch_stats_subtitle", fallback: "Watched activity returned from your Trakt account")
                     ) {
                         TraktConnectedStatsStrip(
                             stats: viewModel.connectedStats,
@@ -4691,7 +4971,7 @@ private struct TraktConnectedSettingsSheet: View {
                             title: L10n.string("tvos_settings_sync_now", fallback: "Sync Now"),
                             subtitle: L10n.string(
                                 "tvos_settings_refresh_trakt_user_info_and_cached_stats",
-                                fallback: "Refresh Trakt watch progress, user info, and cached stats"
+                                fallback: "Refresh Trakt watch progress, account information, and watch stats"
                             ),
                             value: viewModel.isLoading
                                 ? L10n.string("tvos_settings_syncing", fallback: "Syncing")
@@ -4711,7 +4991,7 @@ private struct TraktConnectedSettingsSheet: View {
                             title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                             subtitle: L10n.string("tvos_settings_trakt_library_source_subtitle", fallback: "Choose which library to use for saving and viewing your collection"),
                             selection: librarySourceSelection,
-                            options: ["Trakt", "Simkl", "Nuvio Library"],
+                            options: RemoteTrackingState.availableLibrarySources().map(\.label),
                             accentColor: accentColor
                         )
 
@@ -4722,7 +5002,7 @@ private struct TraktConnectedSettingsSheet: View {
                                 fallback: "Choose the source for Resume, Continue Watching, and watched updates"
                             ),
                             selection: watchProgressSelection,
-                            options: ["Trakt", "Simkl", "Nuvio Sync"],
+                            options: RemoteTrackingState.availableProgressSources().map(\.label),
                             accentColor: accentColor
                         )
 
@@ -4745,16 +5025,18 @@ private struct TraktConnectedSettingsSheet: View {
                             accentColor: accentColor
                         )
 
-                        SettingsChoiceRow(
-                            title: L10n.string("tmdb_more_like_this_title", fallback: "More Like This"),
-                            subtitle: L10n.string(
-                                "tvos_settings_recommendation_source_for_related_titles",
-                                fallback: "Choose where recommendations come from on detail pages"
-                            ),
-                            selection: moreLikeThisSelection,
-                            options: TraktMoreLikeThisSource.allCases.map(\.label),
-                            accentColor: accentColor
-                        )
+                        if !RemoteTrackingState.availableMoreLikeThisSources().isEmpty {
+                            SettingsChoiceRow(
+                                title: L10n.string("tmdb_more_like_this_title", fallback: "More Like This"),
+                                subtitle: L10n.string(
+                                    "tvos_settings_recommendation_source_for_related_titles",
+                                    fallback: "Choose where recommendations come from on detail pages"
+                                ),
+                                selection: moreLikeThisSelection,
+                                options: RemoteTrackingState.availableMoreLikeThisSources().map(\.label),
+                                accentColor: accentColor
+                            )
+                        }
                     }
 
                     if let message = viewModel.statusMessage, !message.isEmpty {
@@ -4907,6 +5189,53 @@ private struct TraktConnectedStatsStrip: View {
             stat(
                 text: stats?.totalWatchedHours.map { "\($0)h" },
                 label: L10n.string("tvos_settings_hours", fallback: "Watched Hours")
+            )
+        }
+        .padding(.vertical, 18)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .top) { Divider().overlay(Color.white.opacity(0.16)) }
+        .overlay(alignment: .bottom) { Divider().overlay(Color.white.opacity(0.16)) }
+    }
+
+    private var divider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.16))
+            .frame(width: 1, height: 72)
+    }
+
+    private func stat(value: Int?, label: String) -> some View {
+        stat(text: value.map(String.init), label: label)
+    }
+
+    private func stat(text: String?, label: String) -> some View {
+        VStack(spacing: 7) {
+            Text(text ?? (isLoading ? "..." : "-"))
+                .font(.system(size: 27, weight: .semibold))
+                .foregroundColor(.white)
+            Text(label)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(.white.opacity(0.62))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct MdbListConnectedStatsStrip: View {
+    let stats: MdbListWatchStats?
+    let isLoading: Bool
+
+    var body: some View {
+        HStack(spacing: 0) {
+            stat(value: stats?.moviesWatched, label: L10n.string("nav_movies", fallback: "Movies"))
+            divider
+            stat(value: stats?.showsWatched, label: L10n.string("trakt_stat_shows", fallback: "Shows"))
+            divider
+            stat(value: stats?.episodesWatched, label: L10n.string("tmdb_episodes_title", fallback: "Episodes"))
+            divider
+            stat(
+                text: stats?.totalWatchedHours.map { "\($0)h" },
+                label: L10n.string("tvos_settings_hours", fallback: "Hours")
             )
         }
         .padding(.vertical, 18)
@@ -5184,6 +5513,384 @@ private struct SimklConnectionSettingsCard: View {
     }
 }
 
+private struct MdbListConnectionSettingsCard: View {
+    @ObservedObject var viewModel: MdbListSettingsViewModel
+    let accentColor: Color
+    let onStartLogin: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 18) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.10, green: 0.34, blue: 0.24),
+                                    Color(red: 0.12, green: 0.23, blue: 0.18)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    Text("MDBList")
+                        .font(.system(size: 19, weight: .black))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 112, height: 62)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(statusTitle)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.white)
+
+                    Text(statusSubtitle)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 16)
+            }
+
+            switch viewModel.mode {
+            case .disconnected, .awaitingApproval:
+                SettingsActionRow(
+                    title: viewModel.mode == .awaitingApproval
+                        ? "Continue MDBList Login"
+                        : "Connect MDBList Account",
+                    subtitle: viewModel.hasAPIKey
+                        ? "An API key is available for playback; account login adds account status and renewable access."
+                        : "Scan the QR code and approve MDBList on your phone.",
+                    value: viewModel.mode == .awaitingApproval ? "Resume" : "Connect",
+                    accentColor: accentColor
+                ) {
+                    onStartLogin()
+                }
+            case .connected:
+                SettingsActionRow(
+                    title: "MDBList Account",
+                    subtitle: "Manage playback, watched history, and the connected account.",
+                    value: "Open",
+                    accentColor: accentColor,
+                    action: onOpenSettings
+                )
+            }
+
+            if let message = viewModel.statusMessage, !message.isEmpty, viewModel.mode == .connected {
+                Text(message)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(.white.opacity(0.62))
+            }
+
+            if let error = viewModel.errorMessage, !error.isEmpty, viewModel.mode != .awaitingApproval {
+                Text(error)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
+            }
+        }
+    }
+
+    private var statusTitle: String {
+        switch viewModel.mode {
+        case .disconnected:
+            return viewModel.hasAPIKey ? "API key ready" : "Not connected"
+        case .awaitingApproval:
+            return "Waiting for approval"
+        case .connected:
+            let name = viewModel.displayName?.isEmpty == false
+                ? (viewModel.displayName ?? "MDBList User")
+                : (viewModel.username ?? "MDBList User")
+            return "Connected as \(name)"
+        }
+    }
+
+    private var statusSubtitle: String {
+        switch viewModel.mode {
+        case .disconnected:
+            return "MDBList can provide remote Continue Watching and watched-state sync."
+        case .awaitingApproval:
+            return "Finish approving this Apple TV in MDBList, or resume the login sheet."
+        case .connected:
+            return "This profile can use MDBList-backed playback and watched history."
+        }
+    }
+}
+
+private struct MdbListConnectedSettingsSheet: View {
+    @ObservedObject var viewModel: MdbListSettingsViewModel
+    let accentColor: Color
+
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @State private var showingDisconnectConfirmation = false
+
+    var body: some View {
+        ZStack {
+            Color.nuvioBackground(amoled: amoled, body: bodyColor)
+                .ignoresSafeArea()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("MDBList")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(.white)
+                        Text("Connected as \(connectedUsername). Manage remote playback and watched history.")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.white.opacity(0.62))
+                    }
+
+                    SettingsGroup(
+                        title: "Account",
+                        subtitle: "This profile's MDBList connection"
+                    ) {
+                        SettingsInfoRow(title: "Name", value: connectedUsername)
+                        if let accountID = viewModel.accountID, !accountID.isEmpty {
+                            SettingsInfoRow(title: "Account ID", value: accountID)
+                        }
+                        SettingsActionRow(
+                            title: "Disconnect",
+                            subtitle: "Remove this profile's MDBList tokens from this Apple TV",
+                            value: "Disconnect",
+                            accentColor: accentColor
+                        ) {
+                            showingDisconnectConfirmation = true
+                        }
+                    }
+
+                    SettingsGroup(
+                        title: "Watch Stats",
+                        subtitle: "Watched activity returned from your MDBList account"
+                    ) {
+                        MdbListConnectedStatsStrip(
+                            stats: viewModel.connectedStats,
+                            isLoading: viewModel.isStatsLoading
+                        )
+
+                        SettingsActionRow(
+                            title: "Sync Now",
+                            subtitle: "Refresh MDBList watch progress, account information, and watch stats",
+                            value: (viewModel.isLoading || viewModel.isStatsLoading) ? "Syncing" : "Refresh",
+                            accentColor: accentColor
+                        ) {
+                            viewModel.refreshNow()
+                        }
+                        .disabled(viewModel.isLoading || viewModel.isStatsLoading)
+                    }
+
+                    SettingsGroup(
+                        title: "MDBList Features",
+                        subtitle: "Choose where playback, watched updates, and the Library are stored"
+                    ) {
+                        SettingsChoiceRow(
+                            title: "Watch Progress",
+                            subtitle: "Use MDBList for remote playback progress and watched updates",
+                            selection: watchProgressSelection,
+                            options: RemoteTrackingState.availableProgressSources().map(\.label),
+                            accentColor: accentColor
+                        )
+
+                        SettingsChoiceRow(
+                            title: "Library Source",
+                            subtitle: "Use MDBList collection and watchlist as your Nuvio library",
+                            selection: librarySourceSelection,
+                            options: RemoteTrackingState.availableLibrarySources().map(\.label),
+                            accentColor: accentColor
+                        )
+
+                    }
+
+                    if let message = viewModel.statusMessage, !message.isEmpty {
+                        Text(message)
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.white.opacity(0.62))
+                    }
+                    if let error = viewModel.errorMessage, !error.isEmpty {
+                        Text(error)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.red.opacity(0.9))
+                    }
+                }
+                .frame(width: 1_000, alignment: .leading)
+                .padding(.horizontal, 52)
+                .padding(.vertical, 38)
+            }
+            .focusSection()
+        }
+        .onExitCommand { dismiss() }
+        .task {
+            viewModel.reload()
+            viewModel.loadConnectedData()
+        }
+        .onChange(of: viewModel.mode) { _, mode in
+            if mode != .connected { dismiss() }
+        }
+        .confirmationDialog(
+            "Disconnect MDBList?",
+            isPresented: $showingDisconnectConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect", role: .destructive) {
+                viewModel.disconnect()
+            }
+            Button(L10n.string("action_cancel", fallback: "Cancel"), role: .cancel) {}
+        }
+    }
+
+    private var connectedUsername: String {
+        let username = (viewModel.displayName ?? viewModel.username ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return username.isEmpty ? "MDBList User" : username
+    }
+
+    private var watchProgressSelection: Binding<String> {
+        Binding(
+            get: { TraktSettingsStore.watchProgressSource.label },
+            set: { label in
+                TraktSettingsStore.markWatchProgressSourceChosenByUser()
+                TraktSettingsStore.watchProgressSource =
+                    TraktWatchProgressSource.allCases.first { $0.label == label } ?? .mdblist
+            }
+        )
+    }
+
+    private var librarySourceSelection: Binding<String> {
+        Binding(
+            get: { TraktSettingsStore.librarySourceMode.label },
+            set: { label in
+                TraktSettingsStore.librarySourceMode =
+                    TraktLibrarySourceMode.allCases.first { $0.label == label } ?? .local
+            }
+        )
+    }
+
+}
+
+private struct MdbListDeviceLoginSheet: View {
+    @ObservedObject var viewModel: MdbListSettingsViewModel
+    let accentColor: Color
+
+    @Environment(\.dismiss) private var dismiss
+
+    private var activationURL: String {
+        viewModel.verificationURL ?? MdbListConfig.deviceLoginURL
+    }
+
+    var body: some View {
+        VStack(spacing: 28) {
+            Text(viewModel.mode == .connected ? "MDBList Connected" : "Connect MDBList")
+                .font(.system(size: 42, weight: .regular))
+                .foregroundColor(.white)
+
+            if viewModel.mode == .connected {
+                Text((viewModel.displayName ?? viewModel.username).map { "Signed in as \($0)" } ?? "This Apple TV is linked to MDBList.")
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundColor(.white.opacity(0.66))
+                    .multilineTextAlignment(.center)
+                dialogButton(title: "Done", isPrimary: true) { dismiss() }
+            } else if let code = viewModel.deviceUserCode, !code.isEmpty {
+                Text("Scan the QR on your phone, or open the MDBList sign-in page and enter the code.")
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundColor(.white.opacity(0.68))
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let image = QRCode.image(from: activationURL, scale: 10) {
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 300, height: 300)
+                        .padding(16)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                }
+
+                VStack(spacing: 12) {
+                    Text(code)
+                        .font(.system(size: 54, weight: .bold, design: .rounded))
+                        .tracking(4)
+                        .foregroundColor(.white)
+                        .accessibilityLabel("MDBList activation code \(code)")
+                    Text(activationURL)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.54))
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 10) {
+                    if viewModel.isPolling { ProgressView().tint(.white) }
+                    Text(viewModel.statusMessage ?? "Waiting for approval…")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.64))
+                }
+
+                if let error = viewModel.errorMessage, !error.isEmpty {
+                    Text(error)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
+                        .multilineTextAlignment(.center)
+                }
+
+                HStack(spacing: 18) {
+                    dialogButton(title: "Cancel", isPrimary: false) {
+                        viewModel.cancelLogin()
+                        dismiss()
+                    }
+                    dialogButton(title: "Retry", isPrimary: true) {
+                        viewModel.cancelLogin()
+                        viewModel.connect()
+                    }
+                }
+            } else if viewModel.errorMessage == nil {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(.white)
+                    .frame(height: 320)
+                Text(viewModel.statusMessage ?? "Starting MDBList login…")
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.white.opacity(0.64))
+                dialogButton(title: "Cancel", isPrimary: false) {
+                    viewModel.cancelLogin()
+                    dismiss()
+                }
+            } else {
+                Text(viewModel.errorMessage ?? "Unable to start MDBList login.")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
+                    .multilineTextAlignment(.center)
+                HStack(spacing: 18) {
+                    dialogButton(title: "Close", isPrimary: false) { dismiss() }
+                    dialogButton(title: "Retry", isPrimary: true) { viewModel.connect() }
+                }
+            }
+        }
+        .frame(width: 960)
+        .padding(.horizontal, 88)
+        .padding(.vertical, 64)
+        .loginGlassPanel()
+        .onAppear {
+            viewModel.reload()
+            if viewModel.mode == .disconnected && viewModel.deviceUserCode == nil {
+                viewModel.connect()
+            }
+        }
+        .onChange(of: viewModel.mode) { _, mode in
+            if mode == .connected {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    dismiss()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func dialogButton(title: String, isPrimary: Bool, action: @escaping () -> Void) -> some View {
+        ProviderLoginGlassButton(title: title, isPrimary: isPrimary, action: action)
+    }
+}
+
 private struct SimklConnectedSettingsSheet: View {
     @ObservedObject var viewModel: SimklSettingsViewModel
     let accentColor: Color
@@ -5233,8 +5940,8 @@ private struct SimklConnectedSettingsSheet: View {
                         }
 
                         SettingsGroup(
-                            title: L10n.string("tvos_settings_cached", fallback: "Cached"),
-                            subtitle: L10n.string("tvos_settings_simkl_cached_subtitle", fallback: "Watched activity currently loaded from your Simkl account")
+                            title: L10n.string("tvos_settings_watch_stats", fallback: "Watch Stats"),
+                            subtitle: L10n.string("tvos_settings_simkl_watch_stats_subtitle", fallback: "Watched activity returned from your Simkl account")
                         ) {
                             SimklConnectedStatsStrip(
                                 stats: viewModel.connectedStats,
@@ -5243,7 +5950,7 @@ private struct SimklConnectedSettingsSheet: View {
 
                             SettingsActionRow(
                                 title: L10n.string("tvos_settings_sync_now", fallback: "Sync Now"),
-                                subtitle: L10n.string("tvos_settings_simkl_sync_subtitle", fallback: "Refresh Simkl watch progress, account information, and cached stats"),
+                                subtitle: L10n.string("tvos_settings_simkl_sync_watch_stats_subtitle", fallback: "Refresh Simkl watch progress, account information, and watch stats"),
                                 value: viewModel.isLoading
                                     ? L10n.string("tvos_settings_syncing", fallback: "Syncing")
                                     : L10n.string("tvos_settings_refresh", fallback: "Refresh"),
@@ -5267,7 +5974,7 @@ private struct SimklConnectedSettingsSheet: View {
                                 title: L10n.string("trakt_library_source_dialog_title", fallback: "Library Source"),
                                 subtitle: L10n.string("tvos_settings_simkl_library_source_subtitle", fallback: "Use Simkl Plan to Watch as your Nuvio library"),
                                 selection: librarySourceSelection,
-                                options: TraktLibrarySourceMode.allCases.map(\.label),
+                                options: RemoteTrackingState.availableLibrarySources().map(\.label),
                                 accentColor: accentColor
                             )
                             .disabled(
@@ -5280,7 +5987,7 @@ private struct SimklConnectedSettingsSheet: View {
                                 title: L10n.string("trakt_watch_progress_dialog_title", fallback: "Watch Progress"),
                                 subtitle: L10n.string("tvos_settings_simkl_watch_progress_subtitle", fallback: "Use Simkl for Resume, Continue Watching, and watched updates"),
                                 selection: watchProgressSelection,
-                                options: TraktWatchProgressSource.allCases.map(\.label),
+                                options: RemoteTrackingState.availableProgressSources().map(\.label),
                                 accentColor: accentColor
                             )
                             .disabled(
@@ -5289,13 +5996,15 @@ private struct SimklConnectedSettingsSheet: View {
                                     || viewModel.isTransferringProgress
                             )
 
-                            SettingsChoiceRow(
-                                title: L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This"),
-                                subtitle: L10n.string("tvos_settings_simkl_more_like_this_subtitle", fallback: "Choose where recommendations come from on detail pages"),
-                                selection: moreLikeThisSelection,
-                                options: TraktMoreLikeThisSource.allCases.map(\.label),
-                                accentColor: accentColor
-                            )
+                            if !RemoteTrackingState.availableMoreLikeThisSources().isEmpty {
+                                SettingsChoiceRow(
+                                    title: L10n.string("settings_tmdb_module_more_like_this", fallback: "More Like This"),
+                                    subtitle: L10n.string("tvos_settings_simkl_more_like_this_subtitle", fallback: "Choose where recommendations come from on detail pages"),
+                                    selection: moreLikeThisSelection,
+                                    options: RemoteTrackingState.availableMoreLikeThisSources().map(\.label),
+                                    accentColor: accentColor
+                                )
+                            }
 
                             SettingsToggleRow(
                                 title: L10n.string("tvos_settings_simkl_plan_to_watch_home", fallback: "Plan to Watch on Home"),
@@ -5871,6 +6580,9 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.showAddonLogo) private var showAddonLogo = false
     @AppStorage(SettingsKey.streamBadgePlacement) private var streamBadgePlacement = StreamBadgePlacement.bottom.rawValue
     @AppStorage(SettingsKey.autoPlayNext) private var autoPlayNext = true
+    @AppStorage(SettingsKey.streamAutoPlayPreferBingeGroup) private var streamAutoPlayPreferBingeGroup = true
+    @AppStorage(SettingsKey.streamAutoPlayReuseBingeGroup) private var streamAutoPlayReuseBingeGroup = true
+    @AppStorage(SettingsKey.seekPreviewEnabled) private var seekPreviewEnabled = true
     @AppStorage(SettingsKey.postPlayRecommendationsEnabled) private var postPlayRecommendationsEnabled = true
     @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
     @AppStorage(SettingsKey.trailerPreviewSound) private var trailerPreviewSound = false
@@ -5883,6 +6595,8 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.forcedSubtitles) private var forcedSubtitles = true
     @AppStorage(SettingsKey.frameRateMatching) private var frameRateMatching = "Always"
     @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
+    @AppStorage(SettingsKey.hybridDiskCacheEnabled) private var hybridDiskCacheEnabled = true
+    @AppStorage(SettingsKey.hybridDiskCacheLimitGB) private var hybridDiskCacheLimitGB = 20
     @AppStorage(SettingsKey.assOverrideMode) private var assOverrideMode = "Strip"
     @AppStorage(SettingsKey.playerShowPiP) private var playerShowPiP = true
     @AppStorage(SettingsKey.playerShowEpisodes) private var playerShowEpisodes = true
@@ -5900,7 +6614,7 @@ private struct PlaybackSettingsView: View {
     private let frameRateModes = ["Off", "On start/stop", "Always"]
     /// Buffer profiles: Auto scales to RAM; Conservative/Large match product names;
     /// legacy Small/Medium/Large keys still work via PlaybackCacheSettings.
-    private let cacheModes = ["Auto", "Conservative", "Medium", "Large", "Max"]
+    private let cacheModes = ["Auto", "Conservative", "Medium", "Large", "Max", "Ultra"]
     private let assModes = ["Strip", "Scale", "Force"]
     private let streamSortModes = StreamSortOption.allCases.map(\.rawValue)
 
@@ -5953,12 +6667,35 @@ private struct PlaybackSettingsView: View {
                 )
 
                 SettingsToggleRow(
+                    title: L10n.string("tvos_settings_prefer_binge_group", fallback: "Prefer Same Source / Binge Group"),
+                    subtitle: L10n.string(
+                        "tvos_settings_prefer_binge_group_subtitle",
+                        fallback: "Automatically match and play streams from the same release group, add-on, and resolution across consecutive episodes and continue watching."
+                    ),
+                    isOn: Binding(
+                        get: { streamAutoPlayPreferBingeGroup || streamAutoPlayReuseBingeGroup },
+                        set: { newValue in
+                            streamAutoPlayPreferBingeGroup = newValue
+                            streamAutoPlayReuseBingeGroup = newValue
+                        }
+                    ),
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
                     title: L10n.string("tvos_settings_post_play_recommendations", fallback: "Post-Play Recommendations"),
                     subtitle: L10n.string(
                         "tvos_settings_post_play_recommendations_subtitle",
                         fallback: "Show paged recommendations with trailer previews and quick play when reaching the end of movies or series."
                     ),
                     isOn: $postPlayRecommendationsEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_seeking_preview", fallback: "Seeking Preview"),
+                    subtitle: L10n.string("tvos_settings_seeking_preview_subtitle", fallback: "Show thumbnail previews while scrubbing through video"),
+                    isOn: $seekPreviewEnabled,
                     accentColor: accentColor
                 )
 
@@ -5974,13 +6711,37 @@ private struct PlaybackSettingsView: View {
                     title: L10n.string("tvos_settings_buffer_profile", fallback: "Buffer Profile"),
                     subtitle: L10n.string(
                         "tvos_settings_buffer_profile_aether",
-                        fallback: "Disk-backed forward buffer (Aether segments) / MPV demuxer cache. Auto scales to device RAM."
+                        fallback: "Disk-backed forward buffer (Aether segments) / MPV demuxer cache. Auto dynamically scales to memory."
                     ),
                     selection: $networkCache,
                     options: cacheModes,
                     accentColor: accentColor
                 )
 
+                SettingsToggleRow(
+                    title: L10n.string("tvos_settings_hybrid_disk_cache", fallback: "Hybrid Disk Cache"),
+                    subtitle: L10n.string(
+                        "tvos_settings_hybrid_disk_cache_subtitle",
+                        fallback: "3-tier cache to Apple TV SSD (Demand, 10-min forward fill, whole-file background archive) with instant seek and rewind."
+                    ),
+                    isOn: $hybridDiskCacheEnabled,
+                    accentColor: accentColor
+                )
+
+                if hybridDiskCacheEnabled {
+                    SettingsStepperRow(
+                        title: L10n.string("tvos_settings_hybrid_disk_cache_limit", fallback: "Disk Cache Limit"),
+                        subtitle: L10n.string(
+                            "tvos_settings_hybrid_disk_cache_limit_subtitle",
+                            fallback: "Maximum SSD storage for video prefetching and background title caching."
+                        ),
+                        value: $hybridDiskCacheLimitGB,
+                        range: 5...60,
+                        step: 5,
+                        suffix: " GB",
+                        accentColor: accentColor
+                    )
+                }
             }
 
             SettingsGroup(
@@ -6042,7 +6803,10 @@ private struct PlaybackSettingsView: View {
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_use_top_result", fallback: "Use Top Result"),
-                    subtitle: L10n.string("tvos_settings_use_top_result_subtitle", fallback: "Play the first available source in the list, respecting your stream sort and add-on order"),
+                    subtitle: L10n.string(
+                        "tvos_settings_use_top_result_subtitle",
+                        fallback: "Play the first available source in the list, respecting your stream sort and add-on order (bypasses smart quality scoring)"
+                    ),
                     isOn: $smartStreamUseTopResult,
                     accentColor: accentColor
                 )
@@ -6056,8 +6820,8 @@ private struct PlaybackSettingsView: View {
                     options: streamQualities,
                     accentColor: accentColor
                 )
-                .opacity(smartStreamSelection ? 1 : 0.46)
-                .disabled(!smartStreamSelection)
+                .opacity((smartStreamSelection && !smartStreamUseTopResult) ? 1 : 0.46)
+                .disabled(!smartStreamSelection || smartStreamUseTopResult)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_match_subtitle_language", fallback: "Match Subtitle Language"),
@@ -6065,8 +6829,8 @@ private struct PlaybackSettingsView: View {
                     isOn: $smartSubtitleMatching,
                     accentColor: accentColor
                 )
-                .opacity(smartStreamSelection ? 1 : 0.46)
-                .disabled(!smartStreamSelection)
+                .opacity((smartStreamSelection && !smartStreamUseTopResult) ? 1 : 0.46)
+                .disabled(!smartStreamSelection || smartStreamUseTopResult)
 
                 SettingsToggleRow(
                     title: L10n.string("tvos_settings_cached_only", fallback: "Cached Only"),
@@ -6094,10 +6858,10 @@ private struct PlaybackSettingsView: View {
             streamBadgesSettings
 
             SettingsGroup(
-                title: L10n.string("tvos_playback_audio_subtitles", fallback: "Audio & Subtitles"),
+                title: L10n.string("tvos_playback_audio_subtitles", fallback: "Audio & Subtitle Languages"),
                 subtitle: L10n.string(
                     "tvos_playback_audio_subtitles_subtitle",
-                    fallback: "Language and subtitle rendering defaults"
+                    fallback: "Default language preferences for audio and subtitle tracks"
                 )
             ) {
                 SettingsActionRow(
@@ -6982,7 +7746,6 @@ private struct AdvancedSettingsView: View {
     let accentColor: Color
 
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
-    @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
     @AppStorage(SettingsKey.playbackDebug) private var playbackDebug = false
     @State private var isSeedingTestHistory = false
@@ -6990,8 +7753,6 @@ private struct AdvancedSettingsView: View {
     @State private var isClearingCache = false
     @State private var clearedCacheStatus: String?
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.iCloudSyncEnabled) private var iCloudSyncEnabled = false
-    @ObservedObject private var iCloudSyncManager = ICloudSettingsSyncManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -7009,13 +7770,6 @@ private struct AdvancedSettingsView: View {
                     accentColor: accentColor
                 )
                 .settingsEntryAnchor()
-
-                SettingsToggleRow(
-                    title: L10n.string("tvos_settings_smooth_bring_into_view", fallback: "Smooth Bring Into View"),
-                    subtitle: L10n.string("tvos_settings_animate_focused_content_into_a_readable_position", fallback: "Animate focused content into a readable position"),
-                    isOn: $smoothFocus,
-                    accentColor: accentColor
-                )
             }
 
             SettingsGroup(
@@ -7123,36 +7877,6 @@ private struct AdvancedSettingsView: View {
                     value: testHistoryStatus,
                     isDiagnostic: true
                 )
-            }
-
-            SettingsGroup(
-                title: L10n.string("tvos_settings_icloud_sync_title", fallback: "iCloud Sync"),
-                subtitle: L10n.string(
-                    "tvos_settings_icloud_sync_subtitle",
-                    fallback: "Sync configurations across all Apple TVs on the same iCloud account"
-                )
-            ) {
-                if iCloudSyncEnabled {
-                    SettingsActionRow(
-                        title: L10n.string("tvos_settings_icloud_sync_now", fallback: "Sync Now"),
-                        subtitle: L10n.string(
-                            "tvos_settings_icloud_sync_now_subtitle",
-                            fallback: "Push and pull the latest settings to and from iCloud"
-                        ),
-                        value: L10n.string("action_sync", fallback: "Sync"),
-                        accentColor: accentColor,
-                        action: {
-                            ICloudSettingsSyncManager.shared.syncNow()
-                        }
-                    )
-
-                    if let lastSync = iCloudSyncManager.lastSyncDate {
-                        SettingsInfoRow(
-                            title: L10n.string("tvos_settings_icloud_last_sync", fallback: "Last iCloud Sync"),
-                            value: DateFormatter.localizedString(from: lastSync, dateStyle: .short, timeStyle: .medium)
-                        )
-                    }
-                }
             }
 
             SettingsGroup(
@@ -8701,32 +9425,8 @@ private struct AddonsSettingsSection: View {
         addonID: String,
         addonName: String
     ) -> [TVHomeCatalogOrder.SnapshotRow] {
-        let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources: [CatalogHomeVisibilityResolver.Source] = CollectionsStore.collections().flatMap { collection in
-            collection.folders.flatMap { $0.resolvedSources }
-                .filter { $0.normalizedProvider == "addon" }
-                .compactMap { source in
-                    guard let sourceAddonID = source.addonId,
-                          let sourceType = source.type,
-                          let sourceCatalogID = source.catalogId else { return nil }
-                    return CatalogHomeVisibilityResolver.Source(
-                        addonIdentifier: sourceAddonID,
-                        contentType: sourceType,
-                        catalogID: sourceCatalogID,
-                        collectionID: collection.id
-                    )
-                }
-        }
         let catalogs = (manifest.catalogs ?? []).filter { catalog in
             catalog.eligibleForHome
-                && CatalogHomeVisibilityResolver.shouldInclude(
-                    addonID: addonID,
-                    contentType: catalog.type ?? "",
-                    catalogID: catalog.id ?? "",
-                    collectionSources: collectionSources,
-                    manifestURL: manifestURL,
-                    explicitHomeKeys: activeHomeKeys
-                )
                 && (!catalog.requiresGenre || catalog.firstGenreOption != nil)
         }
         return catalogs.compactMap { catalog in
@@ -8745,22 +9445,26 @@ private struct AddonsSettingsSection: View {
     ) -> TVHomeCatalogOrder.SnapshotRow? {
         guard let type = catalog.type,
               let catalogID = catalog.id else { return nil }
+        let settingsKey = TVHomeCatalogOrder.catalogSettingsKey(
+            addonId: addonID,
+            contentType: type,
+            catalogId: catalogID
+        )
+        let customTitle = TVHomeCatalogOrder.customTitle(forCatalogKey: settingsKey)
         return TVHomeCatalogOrder.SnapshotRow(
             id: "addon_\(addonID)_\(type)_\(catalogID)",
             title: TVHomeCatalogOrder.catalogDisplayTitle(
                 catalog.name ?? catalogID,
                 contentType: type,
-                showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+                showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true,
+                addonName: addonName,
+                customTitle: customTitle
             ),
             addonName: addonName,
             addonId: addonID,
             contentType: type,
             catalogId: catalogID,
-            settingsKey: TVHomeCatalogOrder.catalogSettingsKey(
-                addonId: addonID,
-                contentType: type,
-                catalogId: catalogID
-            )
+            settingsKey: settingsKey
         )
     }
 
@@ -9450,8 +10154,9 @@ private struct CollectionsSettingsSection: View {
     }
 
     static var collectionsExportURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("nuvio-collections.json")
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return documents.appendingPathComponent("nuvio-collections.json")
     }
 
     private func importCollections(_ imported: [[String: Any]]) {
@@ -9637,6 +10342,7 @@ private struct CollectionTemplatesFlowSheet: View {
         case streamingServices
         case studiosAndFranchises
         case discoverByGenre
+        case asianFilmAndSeries
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -9657,8 +10363,8 @@ private struct CollectionTemplatesFlowSheet: View {
                     Color.black.opacity(0.62)
                         .ignoresSafeArea()
 
-                    VStack(alignment: .leading, spacing: 28) {
-                        VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text("Collection Templates")
                                 .font(.system(size: 38, weight: .bold))
                                 .foregroundColor(.white)
@@ -9689,6 +10395,15 @@ private struct CollectionTemplatesFlowSheet: View {
                             selectedTemplate = .discoverByGenre
                         }
 
+                        CollectionTemplateSummaryCard(
+                            title: "Asian Film & Series",
+                            subtitle: "Korean, Chinese & Japanese dramas, Asian cinema, KissKH & MKV",
+                            systemImage: "globe.asia.australia.fill",
+                            previews: ["KissKH", "MKV Asian", "Asian OTT", "K-Drama", "C-Drama", "Anime & J-Drama", "Asian Cinema"]
+                        ) {
+                            selectedTemplate = .asianFilmAndSeries
+                        }
+
                         HStack {
                             Spacer()
                             CollectionsGlassButton(
@@ -9699,7 +10414,7 @@ private struct CollectionTemplatesFlowSheet: View {
                     }
                     .frame(width: 1040)
                     .padding(.horizontal, 56)
-                    .padding(.vertical, 46)
+                    .padding(.vertical, 40)
                     .loginGlassPanel()
                 }
                 .onExitCommand { dismiss() }
@@ -9718,6 +10433,8 @@ private struct CollectionTemplatesFlowSheet: View {
             return StudiosFranchisesCollectionTemplate.payload()
         case .discoverByGenre:
             return DiscoverGenresCollectionTemplate.payload()
+        case .asianFilmAndSeries:
+            return AsianFilmAndSeriesCollectionTemplate.payload()
         }
     }
 }
@@ -10370,6 +11087,372 @@ private enum DiscoverGenresCollectionTemplate {
     }
 
     private static func source(
+        title: String,
+        mediaType: String,
+        sortBy: String,
+        filters: [String: Any]
+    ) -> [String: Any] {
+        [
+            "provider": "tmdb",
+            "tmdbSourceType": "DISCOVER",
+            "title": title,
+            "mediaType": mediaType,
+            "sortBy": sortBy,
+            "filters": filters
+        ]
+    }
+
+    private static func tmdbBackdropURL(path: String) -> String {
+        "https://image.tmdb.org/t/p/w1280\(path)"
+    }
+}
+
+private enum AsianFilmAndSeriesCollectionTemplate {
+    static func payload() -> [String: Any] {
+        let folders: [[String: Any]] = [
+            kisskhFolder(),
+            mkvFolder(),
+            asianOttFolder(),
+            kdramaFolder(),
+            cdramaFolder(),
+            animeAndJdramaFolder(),
+            asianActionFolder()
+        ]
+
+        return [
+            "templateID": "asian-film-series",
+            "templateVersion": 1,
+            "title": "Asian Film & Series",
+            "pinToTop": false,
+            "focusGlowEnabled": true,
+            "viewMode": "ROWS",
+            "showAllTab": false,
+            "folders": folders
+        ]
+    }
+
+    private static func kisskhFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "KissKH",
+            "coverEmoji": "💋",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/oaGvjB0DvdurWhqAuTLYV3t4b2o.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                [
+                    "provider": "addon",
+                    "addonId": "kisskh",
+                    "type": "series",
+                    "catalogId": "kisskh-drama",
+                    "title": "KissKH • Asian Dramas"
+                ],
+                [
+                    "provider": "addon",
+                    "addonId": "kisskh",
+                    "type": "movie",
+                    "catalogId": "kisskh-movies",
+                    "title": "KissKH • Asian Movies"
+                ],
+                tmdbSource(
+                    title: "K-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko"]
+                ),
+                tmdbSource(
+                    title: "C-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "zh"]
+                ),
+                tmdbSource(
+                    title: "Recent Asian Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: ["withOriginalLanguage": "ko|zh|ja|th"]
+                )
+            ]
+        ]
+    }
+
+    private static func mkvFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "MKV Asian Hub",
+            "coverEmoji": "🎬",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/7IiTTgloJzvGI1TAYymCfbfl3vT.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                [
+                    "provider": "addon",
+                    "addonId": "mkv",
+                    "type": "series",
+                    "catalogId": "mkv-drama",
+                    "title": "MKVDrama • Series"
+                ],
+                [
+                    "provider": "addon",
+                    "addonId": "mkv",
+                    "type": "movie",
+                    "catalogId": "mkv-movies",
+                    "title": "MKV • Movies"
+                ],
+                tmdbSource(
+                    title: "Asian Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                ),
+                tmdbSource(
+                    title: "Asian Series • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                ),
+                tmdbSource(
+                    title: "Recent Asian Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: ["withOriginalLanguage": "ko|ja|zh|th|hk"]
+                )
+            ]
+        ]
+    }
+
+    private static func asianOttFolder() -> [String: Any] {
+        [
+            "id": UUID().uuidString,
+            "title": "Asian OTT & Streaming",
+            "coverEmoji": "📺",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/577eXC8wFQT0eUrJcgznSiFPRmk.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Viki • Popular Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "344",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "iQIYI • Asian Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "584",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "Kocowa • K-Dramas",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withWatchProviders": "455",
+                        "watchRegion": "US"
+                    ]
+                ),
+                tmdbSource(
+                    title: "Asian OTT Movies",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: [
+                        "withOriginalLanguage": "ko|zh|ja",
+                        "withWatchProviders": "344|584|455",
+                        "watchRegion": "US"
+                    ]
+                )
+            ]
+        ]
+    }
+
+    private static func kdramaFolder() -> [String: Any] {
+        let filters: [String: Any] = [
+            "withOriginalLanguage": "ko",
+            "withOriginCountry": "KR"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Korean Drama & Film",
+            "coverEmoji": "🇰🇷",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/oaGvjB0DvdurWhqAuTLYV3t4b2o.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "K-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Korean Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Recent K-Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: filters
+                ),
+                tmdbSource(
+                    title: "Recent Korean Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: filters
+                )
+            ]
+        ]
+    }
+
+    private static func cdramaFolder() -> [String: Any] {
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "zh",
+            "withOriginCountry": "CN"
+        ]
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "zh"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Chinese Drama & Film",
+            "coverEmoji": "🇨🇳",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "C-Drama • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Chinese Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent C-Dramas",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Chinese Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                )
+            ]
+        ]
+    }
+
+    private static func animeAndJdramaFolder() -> [String: Any] {
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "ja",
+            "withOriginCountry": "JP"
+        ]
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "ja"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Anime & Japanese Drama",
+            "coverEmoji": "🇯🇵",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/1RgPyOhN4DRs225BGTlHJqCudII.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Japanese Series • Popular",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Japanese Movies • Popular",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent Japanese Shows",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Japanese Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                )
+            ]
+        ]
+    }
+
+    private static func asianActionFolder() -> [String: Any] {
+        let movieFilters: [String: Any] = [
+            "withOriginalLanguage": "zh|ko|ja|th|id|hk",
+            "withGenres": "28"
+        ]
+        let seriesFilters: [String: Any] = [
+            "withOriginalLanguage": "zh|ko|ja|th|id|hk",
+            "withGenres": "10759"
+        ]
+        return [
+            "id": UUID().uuidString,
+            "title": "Asian Action & Martial Arts",
+            "coverEmoji": "🥋",
+            "heroBackdropUrl": tmdbBackdropURL(path: "/sSIzzVhhLfgLKVBcAUv0X6cLYz9.jpg"),
+            "tileShape": "LANDSCAPE",
+            "hideTitle": false,
+            "focusGifEnabled": false,
+            "sources": [
+                tmdbSource(
+                    title: "Action & Martial Arts Movies",
+                    mediaType: "movie",
+                    sortBy: "popularity.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Asian Action Series",
+                    mediaType: "tv",
+                    sortBy: "popularity.desc",
+                    filters: seriesFilters
+                ),
+                tmdbSource(
+                    title: "Recent Action Movies",
+                    mediaType: "movie",
+                    sortBy: "primary_release_date.desc",
+                    filters: movieFilters
+                ),
+                tmdbSource(
+                    title: "Recent Action Shows",
+                    mediaType: "tv",
+                    sortBy: "first_air_date.desc",
+                    filters: seriesFilters
+                )
+            ]
+        ]
+    }
+
+    private static func tmdbSource(
         title: String,
         mediaType: String,
         sortBy: String,

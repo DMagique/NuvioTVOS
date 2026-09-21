@@ -48,30 +48,56 @@
 
 Download the latest Apple TV `.ipa` from [Releases](https://github.com/bobsupra/NuvioTVOS/releases), then sideload it with Xcode, Apple Configurator, or your preferred tool. See the release notes for known issues.
 
+> **AltStore / SideStore / Feather Source:** Add `https://raw.githubusercontent.com/bobsupra/NuvioTVOS/main/apps.json` · [Add to AltStore](altstore://source?url=https://raw.githubusercontent.com/bobsupra/NuvioTVOS/main/apps.json) · [Add to SideStore](sidestore://source?url=https://raw.githubusercontent.com/bobsupra/NuvioTVOS/main/apps.json)
+
 > **New beta alerts:** [Manage notifications](https://github.com/bobsupra/NuvioTVOS/subscription) → choose **Custom → Releases**.
 
 ## Latest tvOS Beta
 
 <!-- BEGIN LATEST_BETA -->
-**Beta 3.3.4** is the latest tvOS release.
+**Beta 3.3.7** is the latest tvOS release.
 
-[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.4/NuvioTV-3.3.4-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.4) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
+[Quick download (.ipa)](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-3.3.7/NuvioTV-3.3.7-unsigned-release.ipa) · [Read the release notes](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-3.3.7) · [Report a bug or suggest an idea](https://github.com/bobsupra/NuvioTVOS/issues/new/choose)
 <!-- END LATEST_BETA -->
 
 > 🎉 **Thank you for 100+ GitHub Stars!** A huge thank you to everyone in the community for supporting NuvioTVOS and helping us reach 100+ stars!
 
 The IPA requires a compatible tvOS development or sideloading signing workflow before installation.
 
-### New in Beta 3.3.4
+### New in Beta 3.3.7
 
-- **Fixed Issues #52 – #62:** Addresses community-reported bugs and feature requests including watch progress resume (#52), addon name display toggle (#53), cache clearing options (#54), Cinemeta layout persistence (#56), subtitle discovery (#57), home scroll smoothness (#58), debrid stream link resolution (#59), and sleep while paused (#62).
-- **Native tvOS Search Keyboard & Dictation (#55, #60):** Integrates native Apple TV keyboard with Siri dictation support and fast focus navigation.
-- **Enhanced Subtitle Selector (#61):** In-player subtitle picker with track selection and timing offset adjustments.
-- **AetherEngine Diagnostics & Hardening:** Enhanced TLS handshakes, HLS origin relay, and software performance snapshot tracking.
+- **High-Throughput Stream Caching:** Integrated local disk and memory proxy server to pre-buffer media segments with customizable cache ceilings.
+- **Direct Jellyfin & SMB Media Indexing:** Enhanced directory traversal, metadata matching, and resume point sync for local SMB shares and Jellyfin servers.
+- **Intro & Outro Auto-Skip:** Automated skip triggers powered by IntroDB integration for seamless series binge-watching.
+- **Playback Engine & Buffering Polish:** Hardened controller lifecycles and seamless recovery from momentary network fluctuations.
+- **AltStore, SideStore & Feather Repository Feed:** Updated `apps.json` multi-source feed with complete release history and verified bundle sizes.
 
-### The new player
+### Built-in Player
 
-Nuvio now uses **AetherEngine** as its primary built-in player instead of the legacy AVPlayer implementation. It supports tvOS-native playback controls, precise seeking and resume, embedded and configured subtitles, styled text and PGS bitmap subtitles, saved audio/subtitle selections, and automatic frame-rate matching. **MPVKit** remains available as a one-way compatibility fallback for sources or controls that AetherEngine cannot currently handle, including separate video/audio URLs, audio delay, audio amplification, and ASS Scale mode.
+Nuvio ships with **AetherEngine** — a free, built-in player with native tvOS controls, subtitle support, resume, audio delay adjustment, and frame-rate matching. **MPVKit** stays as a fallback for edge cases AetherEngine doesn't cover yet (including audio amplification, separate video/audio streams, and full ASS typesetting).
+
+#### AetherEngine vs Infuse
+
+| Feature | AetherEngine (Nuvio) | Infuse |
+|---|---|---|
+| **Price** | ✅ 100% Free & built-in | ❌ Subscription / paid Pro unlock |
+| **Open source** | ✅ Open source (ships with Nuvio) | ❌ Proprietary / closed source |
+| **Native tvOS controls** | ✅ Siri Remote, swipe seek | ✅ Yes |
+| **Resume & watch progress** | ✅ Precise resume | ✅ Yes |
+| **Text subtitles (SRT/VTT)** | ✅ Styled, embedded & external | ✅ Yes |
+| **PGS bitmap subtitles** | ✅ Yes | ✅ Yes |
+| **ASS/SSA subtitles** | ⚠️ Styled (no typesetting) | ✅ Full typesetting |
+| **Audio & subtitle selection** | ✅ Saved per item | ✅ Yes |
+| **Frame-rate & dynamic range matching** | ✅ Automatic | ✅ Automatic |
+| **HDR10, HDR10+ & HLG** | ✅ Native support | ✅ Supported |
+| **Dolby Vision (P5/P8)** | ✅ Built-in | 🔒 Requires paid Infuse Pro |
+| **Dolby Atmos** | ✅ Built-in passthrough (EAC3+JOC) | 🔒 Requires paid Infuse Pro |
+| **High-end audio codecs (DTS-HD, TrueHD)** | ✅ Included free (stream-copy / EAC3 bridge) | 🔒 Requires paid Infuse Pro |
+| **In-player audio delay (lip-sync)** | ✅ Live ±ms offset stepper | ❌ No in-player delay (system/AVR only) |
+| **Audio amplification (boost)** | ⚠️ MPVKit fallback | ✅ Built-in volume boost |
+| **Custom HTTP headers (Referer/User-Agent)** | ✅ Built-in relay & custom headers | ❌ Standard URLs only |
+| **Trakt & Simkl scrobbling** | ✅ Built-in (custom API apps) | 🔌 Trakt only (Simkl not supported) |
+| **Separate video+audio URLs** | ⚠️ MPVKit fallback | ❌ Not supported |
 
 ### Trakt sign-in with your own API app
 
@@ -134,10 +160,12 @@ Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribu
 
 - macOS with Xcode installed.
 - Apple TV simulator runtime installed in Xcode.
-- CocoaPods if `tvosApp/Pods` needs to be regenerated.
+- [Tuist](https://tuist.dev) to generate the Xcode project. Install it with [mise](https://mise.jdx.dev): `mise install` picks up the pinned version from [mise.toml](./mise.toml).
 - Network access for catalog metadata, source lookups, and Swift Package resolution.
 
-The Xcode project targets Apple TV (`SDKROOT = appletvos`) with bundle id `com.nuvio.app.tv`. The tvOS deployment target is configured in [project.pbxproj](./tvosApp/NuvioTV.xcodeproj/project.pbxproj).
+The Xcode project is **generated by Tuist and is not tracked in git**. Edit [tvosApp/Project.swift](./tvosApp/Project.swift) rather than the `.xcodeproj`, then re-run `tuist generate`. Source files are picked up by glob, so adding a file needs no project edit at all.
+
+The app targets Apple TV (`SDKROOT = appletvos`) with bundle id `com.pyksel.nuviotvos` and a tvOS 17.5 deployment target, all declared in `Project.swift`.
 
 ## Setup
 
@@ -159,19 +187,15 @@ If you already cloned upstream without submodules:
 git submodule update --init --recursive
 ```
 
-Install pods if the CocoaPods workspace has not been generated:
+This fork vendors `MPVKit/` in-tree, so there is no submodule step here. Install the pinned toolchain and generate the Xcode project:
 
 ```bash
+mise install
 cd tvosApp
-pod install
-cd ..
+tuist generate
 ```
 
-Open the tvOS workspace:
-
-```bash
-open tvosApp/NuvioTV.xcworkspace
-```
+`tuist generate` opens the workspace in Xcode. Use `--no-open` to only write it.
 
 Use the `NuvioTV` scheme and an Apple TV simulator.
 
@@ -188,6 +212,7 @@ If no Apple TV simulator is booted, open Simulator or Xcode first and start one,
 You can also build directly with Xcode:
 
 ```bash
+(cd tvosApp && tuist generate --no-open)
 xcodebuild \
   -workspace tvosApp/NuvioTV.xcworkspace \
   -scheme NuvioTV \
@@ -210,10 +235,9 @@ Catalogs and metadata use configurable catalog, playback, and subtitle endpoints
 
 ## Tests
 
-Unit and UI test targets live in:
+Unit tests live in [tvosApp/NuvioTVTests](./tvosApp/NuvioTVTests).
 
-- [tvosApp/NuvioTVTests](./tvosApp/NuvioTVTests)
-- [tvosApp/NuvioTVUITests](./tvosApp/NuvioTVUITests)
+[tvosApp/NuvioTVUITests](./tvosApp/NuvioTVUITests) contains UI test sources that no target currently builds; see [docs/tuist-migration.md](./docs/tuist-migration.md).
 
 Run tests from Xcode, or with:
 

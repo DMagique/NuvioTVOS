@@ -59,22 +59,13 @@ public enum AddonTransportUrls {
         extraPathSegment: String? = nil
     ) -> URL? {
         let base = baseUrl(from: manifestURL)
-        let canonicalType: String
-        switch type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "series", "tv", "show", "tvshow", "tv_series", "shows":
-            canonicalType = "series"
-        case "movie", "movies", "film", "films":
-            canonicalType = "movie"
-        default:
-            canonicalType = type
-        }
         let encodedId = encodePathSegment(id)
         let q = query(from: manifestURL)
         let path: String
         if let extra = extraPathSegment, !extra.isEmpty {
-            path = "\(base)/\(resource)/\(canonicalType)/\(encodedId)/\(extra).json\(q)"
+            path = "\(base)/\(resource)/\(type)/\(encodedId)/\(extra).json\(q)"
         } else {
-            path = "\(base)/\(resource)/\(canonicalType)/\(encodedId).json\(q)"
+            path = "\(base)/\(resource)/\(type)/\(encodedId).json\(q)"
         }
         return URL(string: path)
     }

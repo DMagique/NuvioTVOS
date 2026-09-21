@@ -1,8 +1,8 @@
 import SwiftUI
 import AVKit
+import CoreGraphics
 
-private enum PlayerControlFocus: Hashable {
-    case play
+enum PlayerControlFocus: Hashable {
     case pip
     case episodes
     case sources
@@ -15,6 +15,7 @@ struct PlayerControls: View {
     @ObservedObject var viewModel: PlayerViewModel
     var isSkipSegmentFocused: Bool = false
     var isNextEpisodeFocused: Bool = false
+    @Binding var requestedFocus: PlayerControlFocus?
     var onFocusSkipSegment: () -> Void = {}
     var onFocusNextEpisode: () -> Void = {}
 
@@ -24,10 +25,6 @@ struct PlayerControls: View {
     @AppStorage(SettingsKey.playerShowEpisodes) private var playerShowEpisodes = true
     @AppStorage(SettingsKey.playerShowSources) private var playerShowSources = true
     @AppStorage(SettingsKey.playerShowSubtitles) private var playerShowSubtitles = true
-
-    private var isShowingPause: Bool {
-        viewModel.status == .playing
-    }
 
     var body: some View {
         GlassControlsContainer {
@@ -39,6 +36,17 @@ struct PlayerControls: View {
         }
         .onExitCommand {
             viewModel.hideControls()
+        }
+        .onChange(of: requestedFocus) { _, target in
+            guard let target, viewModel.showControls else { return }
+            DispatchQueue.main.async {
+                if target == .timeline {
+                    focusedControl = .timeline
+                } else {
+                    focusedControl = isTransportButtonFocusable(target) ? target : (transportFocusOrder.first ?? .settings)
+                }
+                requestedFocus = nil
+            }
         }
         .onChange(of: viewModel.showSettingsPanel) { _, isPresented in
             if !isPresented, viewModel.showControls {
@@ -52,7 +60,7 @@ struct PlayerControls: View {
                !isSkipSegmentFocused,
                !isNextEpisodeFocused {
                 DispatchQueue.main.async {
-                    focusedControl = viewModel.isLiveStream ? .play : .timeline
+                    focusedControl = viewModel.isLiveStream ? (transportFocusOrder.first ?? .settings) : .timeline
                 }
             }
         }
@@ -65,7 +73,7 @@ struct PlayerControls: View {
                !isNextEpisodeFocused,
                focusedControl == nil {
                 DispatchQueue.main.async {
-                    focusedControl = viewModel.isLiveStream ? .play : .timeline
+                    focusedControl = viewModel.isLiveStream ? (transportFocusOrder.first ?? .settings) : .timeline
                 }
             }
         }
@@ -79,13 +87,13 @@ struct PlayerControls: View {
                !isSkipSegmentFocused,
                !isNextEpisodeFocused {
                 DispatchQueue.main.async {
-                    focusedControl = viewModel.isLiveStream ? .play : .timeline
+                    focusedControl = viewModel.isLiveStream ? (transportFocusOrder.first ?? .settings) : .timeline
                 }
             }
         }
         .onChange(of: viewModel.isLiveStream) { _, isLive in
             if isLive, focusedControl == .timeline {
-                DispatchQueue.main.async { focusedControl = .play }
+                DispatchQueue.main.async { focusedControl = transportFocusOrder.first ?? .settings }
             }
         }
         .onChange(of: viewModel.showPauseOverlay) { _, visible in
@@ -100,17 +108,22 @@ struct PlayerControls: View {
         .onChange(of: isNextEpisodeFocused) { _, isFocused in
             if isFocused { focusedControl = nil }
         }
+        .onChange(of: viewModel.isHoldingSeek) { _, isHolding in
+            if isHolding, viewModel.showControls {
+                DispatchQueue.main.async {
+                    focusedControl = .timeline
+                }
+            }
+        }
         .onChange(of: focusedControl) { _, newControl in
             // Keep this in lockstep with focus so hold-to-seek gating is correct
             // even before the next render cycle.
-            viewModel.isTimelineFocused = (newControl == .timeline)
-            // Keep chrome pinned while browsing buttons that open another
-            // panel. Play/Pause behaves like the timeline and may auto-hide.
+            viewModel.setTimelineFocused(newControl == .timeline)
+            // Keep chrome pinned while browsing buttons that open another panel.
             if let newControl,
-               newControl != .timeline,
-               newControl != .play {
+               newControl != .timeline {
                 viewModel.setControlsAutoHideSuspended(true)
-            } else if newControl == .timeline || newControl == .play {
+            } else if newControl == .timeline {
                 viewModel.setControlsAutoHideSuspended(false)
                 if viewModel.status == .playing {
                     viewModel.scheduleControlsHide()
@@ -118,7 +131,7 @@ struct PlayerControls: View {
             }
         }
         .onDisappear {
-            viewModel.isTimelineFocused = false
+            viewModel.setTimelineFocused(false)
             viewModel.setControlsAutoHideSuspended(false)
         }
     }
@@ -142,7 +155,7 @@ struct PlayerControls: View {
 
     /// Left-to-right order of currently visible transport buttons.
     private var transportFocusOrder: [PlayerControlFocus] {
-        var order: [PlayerControlFocus] = [.play]
+        var order: [PlayerControlFocus] = []
         if viewModel.isPictureInPictureSupported && playerShowPiP { order.append(.pip) }
         if viewModel.canShowEpisodesPanel && playerShowEpisodes { order.append(.episodes) }
         if viewModel.canShowSourcesPanel && playerShowSources { order.append(.sources) }
@@ -173,15 +186,15 @@ struct PlayerControls: View {
     }
 
     /// Settings-style flash prevention: while the progress bar owns focus, only
-    /// Play stays focusable in the transport row. tvOS spatial focus lands on the
+    /// the first transport button stays focusable in the transport row. tvOS spatial focus lands on the
     /// geometric nearest *focusable* control — with a single candidate it goes
-    /// straight to Play, so Episodes/Sources never receive a one-frame flash.
+    /// straight to it, so other buttons never receive a one-frame flash.
     /// Once any transport button is focused, every visible button is focusable
     /// again so left/right still walks the full row.
     private func isTransportButtonFocusable(_ key: PlayerControlFocus) -> Bool {
         guard controlsInteractable else { return false }
         if focusedControl == .timeline || focusedControl == nil {
-            return key == .play
+            return key == (transportFocusOrder.first ?? .settings)
         }
         return true
     }
@@ -190,7 +203,7 @@ struct PlayerControls: View {
         // tvOS often applies spatial focus *before* `onMoveCommand` runs (and
         // may also apply it after). Force the intended control now and re-assert
         // on the next runloop so native geometry cannot keep a wrong target
-        // (e.g. play → settings skipping streams).
+        // (e.g. episodes → settings skipping sources).
         focusedControl = control
         DispatchQueue.main.async {
             focusedControl = control
@@ -203,27 +216,44 @@ struct PlayerControls: View {
         guard !isSkipSegmentFocused, !isNextEpisodeFocused else { return }
         guard controlsInteractable else { return }
 
+        // If we are currently holding to seek, stay on timeline and extend hold
+        if viewModel.isHoldingSeek {
+            if direction == .left || direction == .right {
+                viewModel.handleMoveSeek(direction: direction)
+            }
+            return
+        }
+
         switch direction {
         case .up:
+            viewModel.cancelMoveSeekTracking()
             if origin == .timeline {
-                moveFocus(to: .play)
+                if viewModel.showSkipSegmentCard {
+                    onFocusSkipSegment()
+                } else {
+                    moveFocus(to: transportFocusOrder.first ?? .settings)
+                }
+            } else if viewModel.showNextEpisodeCard {
+                onFocusNextEpisode()
             }
         case .down:
+            viewModel.cancelMoveSeekTracking()
             if origin != .timeline, !viewModel.isLiveStream {
                 moveFocus(to: .timeline)
             }
         case .left:
             if origin == .timeline, !viewModel.isLiveStream {
-                viewModel.nudgeSeek(-Double(viewModel.seekStepSeconds))
-                // Keep focus pinned while seeking / hold-to-seek.
+                viewModel.handleMoveSeek(direction: .left)
                 moveFocus(to: .timeline)
             } else if let index = transportFocusOrder.firstIndex(of: origin),
                       index > 0 {
                 moveFocus(to: transportFocusOrder[index - 1])
+            } else if origin == transportFocusOrder.first, viewModel.showSkipSegmentCard {
+                onFocusSkipSegment()
             }
         case .right:
             if origin == .timeline, !viewModel.isLiveStream {
-                viewModel.nudgeSeek(Double(viewModel.seekStepSeconds))
+                viewModel.handleMoveSeek(direction: .right)
                 moveFocus(to: .timeline)
             } else if let index = transportFocusOrder.firstIndex(of: origin),
                       index < transportFocusOrder.count - 1 {
@@ -274,23 +304,6 @@ struct PlayerControls: View {
 
     private var transportRow: some View {
         HStack(spacing: 18) {
-            glassIconButton(
-                size: 70,
-                iconSize: 30,
-                focusKey: .play,
-                isFocused: focusedControl == .play
-            ) {
-                viewModel.togglePlayPause()
-            } icon: {
-                ZStack {
-                    Image(systemName: "play.fill")
-                        .opacity(isShowingPause ? 0 : 1)
-                    Image(systemName: "pause.fill")
-                        .opacity(isShowingPause ? 1 : 0)
-                }
-            }
-            .id("play_pause_button")
-
             Spacer()
 
             if viewModel.isPictureInPictureSupported && playerShowPiP {
@@ -569,7 +582,7 @@ struct PlayerControls: View {
     // MARK: - Timeline
 
     private var isTimelineFocused: Bool {
-        focusedControl == .timeline
+        focusedControl == .timeline || viewModel.isHoldingSeek
     }
 
     @ViewBuilder
@@ -600,8 +613,26 @@ struct PlayerControls: View {
         PlayerTimelineBar(
             clock: viewModel.clock,
             isTimelineFocused: isTimelineFocused,
-            pendingSeekDelta: viewModel.pendingSeekDelta
+            pendingSeekDelta: viewModel.pendingSeekDelta,
+            speedMultiplier: viewModel.seekSpeedMultiplier
         )
+        .overlay(alignment: .top) {
+            // Keep the geometry mounted even while a still is unavailable so
+            // its first frame is positioned directly over the target. The
+            // overlay never participates in controls layout or hit testing.
+            SeekPreviewTimelineCard(
+                clock: viewModel.clock,
+                pendingSeekDelta: viewModel.pendingSeekDelta,
+                image: (viewModel.isHoldingSeek && viewModel.isSeekPreviewEnabled) ? viewModel.scrubThumbnail : nil,
+                naturalSize: viewModel.videoNaturalSize,
+                speedMultiplier: viewModel.seekSpeedMultiplier
+            )
+            // PlayerTimelineBar follows the 18pt bottom-controls spacing.
+            // Keep the card 16pt above the 70pt transport row.
+            .offset(y: -(270 + 70 + 18 + 16))
+            .allowsHitTesting(false)
+            .transaction { transaction in transaction.animation = nil }
+        }
         .focusable(
             viewModel.showControls
                 && !viewModel.showSettingsPanel
@@ -610,7 +641,7 @@ struct PlayerControls: View {
         )
         .focused($focusedControl, equals: .timeline)
         .focusEffectDisabledIfAvailable()
-        .onTapGesture { viewModel.beginScrub() }
+        .onTapGesture { viewModel.togglePlayPause() }
         .onMoveCommand { direction in
             // Timeline owns move while focused so hold-to-seek cannot promote
             // focus onto the transport buttons. Always route from `.timeline`
@@ -623,12 +654,58 @@ struct PlayerControls: View {
     }
 }
 
+private struct SeekPreviewTimelineCard: View {
+    @ObservedObject var clock: PlaybackClock
+    let pendingSeekDelta: Double
+    let image: CGImage?
+    var naturalSize: CGSize = CGSize(width: 16, height: 9)
+    var speedMultiplier: Int? = nil
+
+    private var target: Double {
+        min(max(clock.position + pendingSeekDelta, 0), max(clock.duration, 0))
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let duration = max(clock.duration, 0.001)
+            let fraction = CGFloat(min(max(target / duration, 0), 1))
+            let width = min(CGFloat(480), max(CGFloat(1), geo.size.width - 32))
+            let cardSize = AppCardStyle.seekCardSize(
+                for: naturalSize,
+                maxWidth: width,
+                maxHeight: width * 9 / 16
+            )
+            let x = min(max(geo.size.width * fraction, cardSize.width / 2 + 16), geo.size.width - cardSize.width / 2 - 16)
+
+            if pendingSeekDelta != 0, let image {
+                VStack(spacing: 8) {
+                    SeekPreviewCard(image: image, width: width, naturalSize: naturalSize)
+                    if let speedMultiplier {
+                        Text("\(speedMultiplier)x")
+                            .font(.system(size: 20, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 3)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(
+                                Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 1)
+                            )
+                    }
+                }
+                .position(x: x, y: 270 - cardSize.height / 2)
+            }
+        }
+        .frame(height: 270)
+    }
+}
+
 // MARK: - Isolated Timeline Bar
 
 private struct PlayerTimelineBar: View {
     @ObservedObject var clock: PlaybackClock
     let isTimelineFocused: Bool
     let pendingSeekDelta: Double
+    var speedMultiplier: Int? = nil
 
     private var duration: Double {
         max(clock.duration, 0.001)
@@ -659,11 +736,22 @@ private struct PlayerTimelineBar: View {
             )
             .frame(height: 14)
 
-            HStack {
+            HStack(spacing: 10) {
                 Text(PlayerTime.formatted(time: displayCurrent))
                 if pendingSeekDelta != 0 {
                     Text(PlayerTimeFormat.signedDelta(pendingSeekDelta))
                         .foregroundColor(.white.opacity(0.85))
+                    if let speedMultiplier {
+                        Text("\(speedMultiplier)x")
+                            .font(.system(size: 16, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(
+                                Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 1)
+                            )
+                    }
                 }
                 Spacer()
                 Text("-" + PlayerTime.formatted(time: displayRemaining))
@@ -1070,6 +1158,7 @@ struct PlayerSettingsPanel: View {
         case audioControl(AudioControl)
         case speed(Float)
         case seekStep(Int)
+        case seekPreview
         case debugOverlay
         case aspect(String)
         case style(StyleControl)
@@ -1743,20 +1832,18 @@ struct PlayerSettingsPanel: View {
     }
 
     private var audioAdjustmentsColumn: some View {
-        let aetherAudioAdjustmentsUnavailable = viewModel.activeEngineKind == .aether
+        let aetherAmplificationUnavailable = viewModel.activeEngineKind == .aether
         return VStack(alignment: .leading, spacing: 28) {
             audioOutputSection
 
             audioStepper(
                 title: "Audio Delay",
                 value: String(format: "%.3fs", Double(viewModel.audioDelayMs) / 1000.0),
-                caption: aetherAudioAdjustmentsUnavailable
-                    ? "Unavailable with Aether"
-                    : "Range: -3.00s to 3.00s",
+                caption: "Range: -3.00s to 3.00s",
                 minusKey: .delayMinus,
                 plusKey: .delayPlus,
-                minusDisabled: aetherAudioAdjustmentsUnavailable || viewModel.audioDelayMs <= -3000,
-                plusDisabled: aetherAudioAdjustmentsUnavailable || viewModel.audioDelayMs >= 3000,
+                minusDisabled: viewModel.audioDelayMs <= -3000,
+                plusDisabled: viewModel.audioDelayMs >= 3000,
                 onMinus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs - 50) },
                 onPlus: { viewModel.setAudioDelayMs(viewModel.audioDelayMs + 50) }
             )
@@ -1764,13 +1851,13 @@ struct PlayerSettingsPanel: View {
             audioStepper(
                 title: "Amplification (PCM)",
                 value: "\(viewModel.audioAmplificationDb) dB",
-                caption: aetherAudioAdjustmentsUnavailable
+                caption: aetherAmplificationUnavailable
                     ? "Unavailable with Aether"
                     : "Range: 0 dB to 10 dB",
                 minusKey: .ampMinus,
                 plusKey: .ampPlus,
-                minusDisabled: aetherAudioAdjustmentsUnavailable || viewModel.audioAmplificationDb <= 0,
-                plusDisabled: aetherAudioAdjustmentsUnavailable || viewModel.audioAmplificationDb >= 10,
+                minusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb <= 0,
+                plusDisabled: aetherAmplificationUnavailable || viewModel.audioAmplificationDb >= 10,
                 onMinus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb - 1) },
                 onPlus: { viewModel.setAudioAmplificationDb(viewModel.audioAmplificationDb + 1) }
             )
@@ -1916,9 +2003,17 @@ struct PlayerSettingsPanel: View {
             .frame(width: 320, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 18) {
-                columnHeader("Diagnostics")
+                columnHeader("Options")
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 12) {
+                        toggleRow(
+                            title: "Seeking Preview",
+                            isOn: viewModel.isSeekPreviewEnabled,
+                            focusKey: .seekPreview
+                        ) {
+                            viewModel.setSeekPreviewEnabled(!viewModel.isSeekPreviewEnabled)
+                        }
+
                         simpleRow(
                             title: "Debug Overlay",
                             isSelected: viewModel.isPlaybackDebugEnabled,
@@ -2007,6 +2102,41 @@ struct PlayerSettingsPanel: View {
                 if isSelected {
                     Image(systemName: "checkmark")
                         .font(.system(size: 25, weight: .bold))
+                        .foregroundColor(isFocused ? .black : .white)
+                }
+            }
+            .padding(.horizontal, 26)
+            .frame(height: 68)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isFocused ? Color.white : Color.white.opacity(0.07))
+            )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($focus, equals: focusKey)
+        .focusEffectDisabledIfAvailable()
+    }
+
+    private func toggleRow(
+        title: String,
+        isOn: Bool,
+        focusKey: Focus,
+        action: @escaping () -> Void
+    ) -> some View {
+        let isFocused = focus == focusKey
+        return Button(action: action) {
+            HStack(spacing: 14) {
+                Text(title)
+                    .font(.system(size: 27, weight: .semibold))
+                    .foregroundColor(isFocused ? .black : .white)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text(isOn ? "On" : "Off")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundColor(isFocused ? .black.opacity(0.85) : .white.opacity(0.75))
+                if isOn {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 23, weight: .bold))
                         .foregroundColor(isFocused ? .black : .white)
                 }
             }

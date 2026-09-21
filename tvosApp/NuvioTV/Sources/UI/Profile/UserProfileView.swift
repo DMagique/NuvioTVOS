@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import UIKit
 
 public struct UserProfileView: View {
     @StateObject private var viewModel: ProfileViewModel
@@ -10,6 +11,7 @@ public struct UserProfileView: View {
     @State private var newProfileName = ""
     @State private var newProfilePin = ""
     @State private var newProfileAvatarId = ProfileAvatarCatalog.defaultId
+    @State private var focusedColor = Color(hex: "#1E88E5")
     @FocusState private var focusedItem: String?
 
     private static let addProfileFocusId = "add_profile"
@@ -29,7 +31,7 @@ public struct UserProfileView: View {
 
     public var body: some View {
         ZStack {
-            ProfileBackground()
+            ProfileBackground(targetColor: focusedColor)
 
             VStack(spacing: 0) {
                 Spacer().frame(height: 162)
@@ -89,12 +91,14 @@ public struct UserProfileView: View {
                         .focused($focusedItem, equals: profile.id)
                     }
 
-                    AddProfileButton(
-                        isFocused: focusedItem == Self.addProfileFocusId
-                    ) {
-                        showingAddProfile = true
+                    if viewModel.canAddProfile {
+                        AddProfileButton(
+                            isFocused: focusedItem == Self.addProfileFocusId
+                        ) {
+                            showingAddProfile = true
+                        }
+                        .focused($focusedItem, equals: Self.addProfileFocusId)
                     }
-                    .focused($focusedItem, equals: Self.addProfileFocusId)
                 }
                 .padding(.horizontal, 80)
                 .frame(maxWidth: .infinity)
@@ -140,9 +144,22 @@ public struct UserProfileView: View {
             } else if focusedItem == nil {
                 focusedItem = initialFocusTarget()
             }
+            updateFocusedColor(for: focusedItem ?? initialFocusTarget())
+        }
+        .onChange(of: focusedItem) { _, newFocus in
+            updateFocusedColor(for: newFocus)
         }
         .onChange(of: accountSyncError) { _, _ in
             focusRetryIfNeeded()
+        }
+        .onChange(of: viewModel.profiles) { _, newProfiles in
+            if focusedItem == Self.addProfileFocusId && !viewModel.canAddProfile {
+                focusedItem = newProfiles.last?.id ?? newProfiles.first?.id
+            }
+            updateFocusedColor(for: focusedItem ?? initialFocusTarget())
+        }
+        .onReceive(AvatarCatalogStore.shared.$items) { _ in
+            updateFocusedColor(for: focusedItem ?? initialFocusTarget())
         }
     }
 
@@ -157,6 +174,41 @@ public struct UserProfileView: View {
             return activeOrLastId
         }
         return viewModel.profiles.first?.id
+    }
+
+    private func updateFocusedColor(for itemId: String?) {
+        guard let itemId else {
+            if let first = viewModel.profiles.first {
+                focusedColor = profileColor(for: first)
+            }
+            return
+        }
+        if itemId == Self.addProfileFocusId {
+            focusedColor = Color(hex: "#555555")
+            return
+        }
+        if let profile = viewModel.profiles.first(where: { $0.id == itemId }) {
+            focusedColor = profileColor(for: profile)
+        }
+    }
+
+    private func profileColor(for profile: Profile) -> Color {
+        if let item = AvatarCatalogStore.shared.item(for: profile.avatarId),
+           let bgHex = item.bgColor, !bgHex.isEmpty {
+            return Color(hex: bgHex)
+        }
+        let palette = [
+            Color(hex: "#1E88E5"),
+            Color(hex: "#E53935"),
+            Color(hex: "#43A047"),
+            Color(hex: "#FB8C00"),
+            Color(hex: "#8E24AA"),
+            Color(hex: "#00ACC1")
+        ]
+        if let idx = viewModel.profiles.firstIndex(where: { $0.id == profile.id }) {
+            return palette[idx % palette.count]
+        }
+        return Color(hex: "#1E88E5")
     }
 
     private func focusRetryIfNeeded() {
@@ -174,27 +226,67 @@ public struct UserProfileView: View {
     }
 }
 
-/// Dark navy base with a soft blue glow toward the top, matching the brand.
+/// Dynamic background matching Android TV: shifts color based on the focused profile
+/// using dual blended vertical and horizontal wash gradients.
 private struct ProfileBackground: View {
+    var targetColor: Color = Color(hex: "#1E88E5")
+
+    private static let background = Color(hex: "#0D0D0F")
+    private static let backgroundElevated = Color(hex: "#1A1A1E")
+
     var body: some View {
+        let gradientTop = Self.backgroundElevated.lerp(to: targetColor, fraction: 0.30)
+        let gradientMid = Self.background.lerp(to: targetColor, fraction: 0.14)
+        let halfFadeStrong = targetColor.opacity(0.26)
+        let halfFadeSoft = targetColor.opacity(0.08)
+
         ZStack {
             LinearGradient(
-                colors: [
-                    Color(red: 0.05, green: 0.10, blue: 0.18),
-                    Color(red: 0.02, green: 0.03, blue: 0.06),
-                    Color.black
+                stops: [
+                    .init(color: gradientTop, location: 0.0),
+                    .init(color: gradientMid, location: 0.42),
+                    .init(color: Self.background, location: 1.0)
                 ],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            RadialGradient(
-                colors: [Color(red: 0.12, green: 0.30, blue: 0.55).opacity(0.55), .clear],
-                center: .top,
-                startRadius: 0,
-                endRadius: 950
+
+            LinearGradient(
+                stops: [
+                    .init(color: halfFadeStrong, location: 0.0),
+                    .init(color: halfFadeSoft, location: 0.45),
+                    .init(color: .clear, location: 0.72),
+                    .init(color: .clear, location: 1.0)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
             )
         }
         .ignoresSafeArea()
+        .animation(.easeInOut(duration: 0.52), value: targetColor)
+    }
+}
+
+fileprivate extension Color {
+    func lerp(to target: Color, fraction: CGFloat) -> Color {
+        let clamped = max(0, min(1, fraction))
+        let c1 = UIColor(self)
+        let c2 = UIColor(target)
+
+        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+
+        guard c1.getRed(&r1, green: &g1, blue: &b1, alpha: &a1),
+              c2.getRed(&r2, green: &g2, blue: &b2, alpha: &a2) else {
+            return fraction > 0.5 ? target : self
+        }
+
+        return Color(
+            red: Double(r1 + clamped * (r2 - r1)),
+            green: Double(g1 + clamped * (g2 - g1)),
+            blue: Double(b1 + clamped * (b2 - b1)),
+            opacity: Double(a1 + clamped * (a2 - a1))
+        )
     }
 }
 
@@ -358,6 +450,7 @@ final class AvatarCatalogStore: ObservableObject {
     /// Shared (not profile-scoped): the catalog is account-wide and identical
     /// for every profile on the device.
     private static let cacheKey = "nuvio.tv.avatarCatalog.v1"
+    private static let storageDirectoryName = "avatarCatalog"
     /// A cold launch competing with the account pull can be rate limited, and
     /// one silent failure used to mean no avatar for the rest of the session.
     private static let maxAttempts = 4
@@ -367,7 +460,17 @@ final class AvatarCatalogStore: ObservableObject {
     }
 
     private func hydrateFromCache() {
-        guard let data = UserDefaults.standard.data(forKey: Self.cacheKey),
+        let data: Data? = {
+            if let fileData = LargePayloadStore.read(key: Self.cacheKey, directory: Self.storageDirectoryName) {
+                return fileData
+            }
+            guard let legacy = UserDefaults.standard.data(forKey: Self.cacheKey) else { return nil }
+            if LargePayloadStore.write(legacy, key: Self.cacheKey, directory: Self.storageDirectoryName) {
+                UserDefaults.standard.removeObject(forKey: Self.cacheKey)
+            }
+            return legacy
+        }()
+        guard let data,
               let cached = try? JSONDecoder().decode([AvatarCatalogItem].self, from: data),
               !cached.isEmpty else { return }
         apply(cached)
@@ -406,7 +509,9 @@ final class AvatarCatalogStore: ObservableObject {
             apply(decoded)
             hasLoaded = true
             if let encoded = try? JSONEncoder().encode(items) {
-                UserDefaults.standard.set(encoded, forKey: Self.cacheKey)
+                if LargePayloadStore.write(encoded, key: Self.cacheKey, directory: Self.storageDirectoryName) {
+                    UserDefaults.standard.removeObject(forKey: Self.cacheKey)
+                }
             }
         } catch {
             scheduleRetry()
@@ -491,7 +596,8 @@ final class ProfileAvatarCache {
     private init() {
         cache.countLimit = 200
         cache.totalCostLimit = 64 * 1024 * 1024 // 64 MB
-        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         diskCacheDirectory = caches.appendingPathComponent("ProfileAvatars", isDirectory: true)
         try? FileManager.default.createDirectory(at: diskCacheDirectory, withIntermediateDirectories: true)
     }

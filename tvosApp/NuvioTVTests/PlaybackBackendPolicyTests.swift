@@ -1,8 +1,144 @@
 import Foundation
+import Combine
 import XCTest
 @testable import NuvioTV
 
 final class PlaybackBackendPolicyTests: XCTestCase {
+    func testPlaybackToggleDirectionUsesBackendTransportTruth() {
+        XCTAssertEqual(PlaybackToggleDirection(isTransportPlaying: true), .pause)
+        XCTAssertEqual(PlaybackToggleDirection(isTransportPlaying: false), .play)
+    }
+
+    @MainActor
+    func testFailedStartupRetryPublishesErrorWithoutSourceWatchdog() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "AetherEngine" }, loadDispatcher: { _, _, _ in XCTFail("Failed startup must not dispatch a load") })
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+        model.reloadCurrentStream = { _, _ in XCTFail("Initialization error must not switch sources"); return nil }
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie")!))
+        XCTAssertEqual(model.playbackStartupError, coordinator.lastLoadError)
+        model.retryPlaybackStartup()
+        XCTAssertNotNil(model.playbackStartupError)
+        XCTAssertNil(model.loadWatchdogTask)
+        XCTAssertEqual(model.status, .error("AetherEngine is unavailable on this device."))
+        model.shutdown()
+    }
+
+    @MainActor
+    func testCoordinatorFallsBackToMPVWhenAetherCannotInitialize() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "Auto" }, loadDispatcher: { _, _, _ in })
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "file:///local/movie.mkv")!))
+
+        XCTAssertEqual(coordinator.activeBackend, .mpv)
+        XCTAssertNil(coordinator.aetherController)
+        XCTAssertTrue(coordinator.lastPolicyReason.contains("Using MPVKit"))
+    }
+
+    @MainActor
+    func testCoordinatorSuppressesMPVFallbackWhenAetherCannotInitializeOnRemoteHTTPS() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "Auto" }, loadDispatcher: { _, _, _ in })
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.com/movie.mkv")!))
+
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertNil(coordinator.aetherController)
+        XCTAssertEqual(coordinator.lastLoadError, "AetherEngine is unavailable on this device.")
+    }
+
+    @MainActor
+    func testCoordinatorDoesNotConstructAetherForForcedMPV() {
+        var constructionCount = 0
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: {
+            constructionCount += 1
+            return nil
+        }, engineSettingProvider: { "MPVKit" }, loadDispatcher: { _, _, _ in })
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "file:///local/movie.mkv")!))
+
+        XCTAssertEqual(constructionCount, 0)
+        XCTAssertEqual(coordinator.activeBackend, .mpv)
+        XCTAssertNil(coordinator.aetherController)
+    }
+
+    @MainActor
+    func testCoordinatorUsesAetherWhenForcedMPVOnRemoteHTTPS() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { AetherPlaybackController() }, engineSettingProvider: { "MPVKit" }, loadDispatcher: { _, _, _ in })
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.com/movie.mkv")!))
+
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertNotNil(coordinator.aetherController)
+    }
+
+    @MainActor
+    func testExplicitAetherFailureIsRecoverable() {
+
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "AetherEngine" }, loadDispatcher: { _, _, _ in })
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.com/movie.mkv")!))
+
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertEqual(coordinator.lastLoadError, "AetherEngine is unavailable on this device.")
+        XCTAssertFalse(coordinator.activeEngine === coordinator.mpvController)
+        coordinator.activeEngine.playPlayback()
+        XCTAssertFalse(coordinator.activeEngine.isPlayerPlaying)
+    }
+
+    @MainActor
+    func testRetryReconnectsReplacementAndRejectsOldTerminalCallback() throws {
+        let first = try XCTUnwrap(AetherPlaybackController())
+        let second = try XCTUnwrap(AetherPlaybackController())
+        var creations = 0
+        var loaded: [PlayerBackendKind] = []
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: {
+            creations += 1
+            return creations == 1 ? first : second
+        }, engineSettingProvider: { "Auto" }, loadDispatcher: { _, backend, _ in loaded.append(backend) })
+        var latestHost: AetherPlaybackController?
+        coordinator.onAetherControllerChanged = { latestHost = $0 }
+        defer { coordinator.stopAll() }
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/movie")!))
+        let oldFailure = first.onTerminalError
+        coordinator.retryLastLoad()
+        XCTAssertTrue(latestHost === second)
+        oldFailure?("stale failure")
+        XCTAssertEqual(loaded, [.aether, .aether])
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+    }
+
+    @MainActor
+    func testRetryConstructsAetherOnceAndStopPreventsRestart() {
+        var constructionCount = 0
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: {
+                constructionCount += 1
+                return nil
+            },
+            engineSettingProvider: { "AetherEngine" },
+            loadDispatcher: { _, _, _ in }
+        )
+        let request = PlaybackLoadRequest(videoURL: URL(string: "https://example.com/movie.mkv")!)
+
+        coordinator.load(request)
+        XCTAssertEqual(constructionCount, 1)
+        coordinator.retryLastLoad()
+        XCTAssertEqual(constructionCount, 2)
+        coordinator.stopAll()
+        coordinator.retryLastLoad()
+        XCTAssertEqual(constructionCount, 2)
+    }
+
+    @MainActor
+    func testRetryForForcedMPVNeverConstructsAether() {
+        var constructionCount = 0
+        let coordinator = PlaybackSessionCoordinator(
+            aetherControllerFactory: {
+                constructionCount += 1
+                return nil
+            },
+            engineSettingProvider: { "MPVKit" },
+            loadDispatcher: { _, _, _ in }
+        )
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "file:///local/movie.mkv")!))
+        coordinator.retryLastLoad()
+        XCTAssertEqual(constructionCount, 0)
+        XCTAssertEqual(coordinator.activeBackend, .mpv)
+    }
 
     func testLiveStreamFailoverRetriesCurrentURLOnceBeforeExcludingIt() {
         let url = "https://sports.example/live.m3u8"
@@ -683,8 +819,13 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertEqual(state.sourceText, "Old")
 
         state.update(sourceText: "Before settings", settings: initial)
+        let translated = expectation(description: "Current settings translation is published")
+        let observation = state.$translatedText.filter { $0 == "fresh" }.first().sink { _ in
+            translated.fulfill()
+        }
+        defer { observation.cancel(); state.cancelPendingTranslations() }
         state.update(sourceText: "New", settings: changed)
-        try await Task.sleep(nanoseconds: 80_000_000)
+        await fulfillment(of: [translated], timeout: 5)
         XCTAssertEqual(state.sourceText, "New")
         XCTAssertEqual(state.translatedText, "fresh")
     }
@@ -787,6 +928,28 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testTrailerPlaybackNeverEntersWatchTrackingEvenWithMovieMetadata() {
+        XCTAssertFalse(
+            PlayerViewModel.shouldTrackPlayback(
+                subtitle: "Movie",
+                isTrailerSession: true
+            )
+        )
+        XCTAssertFalse(
+            PlayerViewModel.shouldTrackPlayback(
+                subtitle: PlaybackMarkers.trailerSubtitle,
+                isTrailerSession: false
+            )
+        )
+        XCTAssertTrue(
+            PlayerViewModel.shouldTrackPlayback(
+                subtitle: "Movie",
+                isTrailerSession: false
+            )
+        )
+    }
+
     private func aiSettings(model: String) -> AISubtitleTranslationSettings {
         AISubtitleTranslationSettings(
             isEnabled: true,
@@ -802,7 +965,7 @@ final class PlaybackBackendPolicyTests: XCTestCase {
     func testAutoSelectsAetherWithFallback() {
         let result = PlaybackBackendPolicy.resolve(
             .init(
-                urlString: "https://cdn.example/movie.mkv",
+                urlString: "file:///local/movie.mkv",
                 separateAudioURL: nil,
                 streamName: nil,
                 streamDescription: nil,
@@ -816,7 +979,41 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertTrue(result.allowAutomaticFallback)
     }
 
+    func testAutoSelectsAetherWithoutFallbackForRemoteHTTPS() {
+        let result = PlaybackBackendPolicy.resolve(
+            .init(
+                urlString: "https://cdn.example/movie.mkv",
+                separateAudioURL: nil,
+                streamName: nil,
+                streamDescription: nil,
+                filename: nil,
+                engineSetting: .auto,
+                requiresMPVAudioControls: false,
+                assMode: .strip
+            )
+        )
+        XCTAssertEqual(result.backend, .aether)
+        XCTAssertFalse(result.allowAutomaticFallback)
+    }
+
     func testForcedMPV() {
+        let result = PlaybackBackendPolicy.resolve(
+            .init(
+                urlString: "file:///local/movie.mkv",
+                separateAudioURL: nil,
+                streamName: nil,
+                streamDescription: nil,
+                filename: nil,
+                engineSetting: .mpv,
+                requiresMPVAudioControls: false,
+                assMode: .strip
+            )
+        )
+        XCTAssertEqual(result.backend, .mpv)
+        XCTAssertFalse(result.allowAutomaticFallback)
+    }
+
+    func testForcedMPVOnRemoteHTTPSRoutesToAether() {
         let result = PlaybackBackendPolicy.resolve(
             .init(
                 urlString: "https://cdn.example/movie.mkv",
@@ -829,8 +1026,9 @@ final class PlaybackBackendPolicyTests: XCTestCase {
                 assMode: .strip
             )
         )
-        XCTAssertEqual(result.backend, .mpv)
+        XCTAssertEqual(result.backend, .aether)
         XCTAssertFalse(result.allowAutomaticFallback)
+        XCTAssertEqual(result.statusMessage, "AetherEngine (MPVKit lacks HTTPS)")
     }
 
     func testForcedAetherDisablesOrdinaryFallback() {
@@ -867,10 +1065,10 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertFalse(result.allowAutomaticFallback)
     }
 
-    func testAudioControlsForceMPV() {
+    func testAudioControlsForceMPVOnLocalFiles() {
         let result = PlaybackBackendPolicy.resolve(
             .init(
-                urlString: "https://cdn.example/movie.mkv",
+                urlString: "file:///local/movie.mkv",
                 separateAudioURL: nil,
                 streamName: nil,
                 streamDescription: nil,
@@ -883,7 +1081,46 @@ final class PlaybackBackendPolicyTests: XCTestCase {
         XCTAssertEqual(result.backend, .mpv)
     }
 
-    func testASSScaleForcesMPV() {
+    func testAudioControlsOnRemoteHTTPSUsesAetherEngine() {
+        let result = PlaybackBackendPolicy.resolve(
+            .init(
+                urlString: "https://cdn.example/movie.mkv",
+                separateAudioURL: nil,
+                streamName: nil,
+                streamDescription: nil,
+                filename: nil,
+                engineSetting: .auto,
+                requiresMPVAudioControls: true,
+                assMode: .strip
+            )
+        )
+        XCTAssertEqual(result.backend, .aether)
+    }
+
+    func testAetherCapabilitiesIncludeAudioDelayAndHTTPS() {
+        XCTAssertTrue(PlaybackEngineCapabilities.aether.supportsAudioDelay)
+        XCTAssertFalse(PlaybackEngineCapabilities.aether.supportsAudioAmplification)
+        XCTAssertTrue(PlaybackEngineCapabilities.aether.supportsDirectHTTPS)
+        XCTAssertFalse(PlaybackEngineCapabilities.mpv.supportsDirectHTTPS)
+    }
+
+    func testASSScaleForcesMPVOnLocalFiles() {
+        let result = PlaybackBackendPolicy.resolve(
+            .init(
+                urlString: "file:///local/anime.mkv",
+                separateAudioURL: nil,
+                streamName: nil,
+                streamDescription: nil,
+                filename: nil,
+                engineSetting: .auto,
+                requiresMPVAudioControls: false,
+                assMode: .scale
+            )
+        )
+        XCTAssertEqual(result.backend, .mpv)
+    }
+
+    func testASSScaleOnRemoteHTTPSUsesAetherEngine() {
         let result = PlaybackBackendPolicy.resolve(
             .init(
                 urlString: "https://cdn.example/anime.mkv",
@@ -896,7 +1133,27 @@ final class PlaybackBackendPolicyTests: XCTestCase {
                 assMode: .scale
             )
         )
-        XCTAssertEqual(result.backend, .mpv)
+        XCTAssertEqual(result.backend, .aether)
+    }
+
+    @MainActor
+    func testAetherTerminalErrorOnRemoteHTTPSDoesNotHandoffToMPV() throws {
+        let aether = try XCTUnwrap(AetherPlaybackController())
+        var loadedBackends: [PlayerBackendKind] = []
+        let coordinator = PlaybackSessionCoordinator(
+            aetherController: aether,
+            aetherControllerFactory: { aether },
+            engineSettingProvider: { "Auto" },
+            loadDispatcher: { _, backend, _ in loadedBackends.append(backend) }
+        )
+        defer { coordinator.stopAll() }
+        coordinator.load(PlaybackLoadRequest(videoURL: URL(string: "https://example.test/stream.mkv")!))
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+
+        aether.onTerminalError?("HTTP 403 Forbidden")
+
+        XCTAssertEqual(coordinator.activeBackend, .aether)
+        XCTAssertEqual(coordinator.lastLoadError, "HTTP 403 Forbidden")
     }
 
     func testSettingsMigration() {
@@ -946,9 +1203,89 @@ final class PlaybackBackendPolicyTests: XCTestCase {
 
     func testCacheSegmentMapping() {
         XCTAssertEqual(PlaybackCacheProfile.conservative.aetherForwardBufferSegments, 4)
-        XCTAssertEqual(PlaybackCacheProfile.auto.aetherForwardBufferSegments, 10)
-        XCTAssertEqual(PlaybackCacheProfile.large.aetherForwardBufferSegments, 30)
-        XCTAssertEqual(PlaybackCacheProfile.max.aetherForwardBufferSegments, 60)
+        XCTAssertEqual(PlaybackCacheProfile.medium.aetherForwardBufferSegments, 10)
+        XCTAssertTrue([4, 10, 18, 25].contains(PlaybackCacheProfile.auto.aetherForwardBufferSegments))
+        XCTAssertEqual(PlaybackCacheProfile.large.aetherForwardBufferSegments, 18)
+        XCTAssertEqual(PlaybackCacheProfile.max.aetherForwardBufferSegments, 25)
+        XCTAssertEqual(PlaybackCacheProfile.ultra.aetherForwardBufferSegments, 25)
+    }
+
+    func testDynamicAutoBufferScaling() {
+        let fourGB: UInt64 = 4 * 1024 * 1024 * 1024
+        let threeGB: UInt64 = 3 * 1024 * 1024 * 1024
+        let twoGB: UInt64 = 2 * 1024 * 1024 * 1024
+
+        let mb1900: size_t = 1900 * 1024 * 1024
+        let mb1500: size_t = 1500 * 1024 * 1024
+        let mb1100: size_t = 1100 * 1024 * 1024
+        let mb900: size_t = 900 * 1024 * 1024
+        let mb500: size_t = 500 * 1024 * 1024
+        let mb300: size_t = 300 * 1024 * 1024
+        let mb100: size_t = 100 * 1024 * 1024
+
+        // High-RAM tier (Apple TV 4K Gen 3 with 4GB RAM + >=1000MB headroom) -> 256MiB / 25 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1500),
+            PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1500),
+            25
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1100),
+            PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb1100),
+            25
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: fourGB, availableMemoryBytes: mb900),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: fourGB, availableMemoryBytes: mb900),
+            18
+        )
+
+        // Mid-RAM tier (Apple TV 4K Gen 1/2 with 3GB RAM + >=450MB headroom) -> 192MiB / 18 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: threeGB, availableMemoryBytes: mb1900),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: threeGB, availableMemoryBytes: mb1900),
+            18
+        )
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: threeGB, availableMemoryBytes: mb500),
+            PlaybackCacheSettings(forwardBuffer: "192MiB", backBuffer: "48MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: threeGB, availableMemoryBytes: mb500),
+            18
+        )
+
+        // Constrained memory tier (>=250MB headroom) -> 128MiB / 10 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: twoGB, availableMemoryBytes: mb300),
+            PlaybackCacheSettings(forwardBuffer: "128MiB", backBuffer: "32MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: twoGB, availableMemoryBytes: mb300),
+            10
+        )
+
+        // Low memory / emergency tier (<250MB headroom) -> 64MiB / 4 segments
+        XCTAssertEqual(
+            PlaybackCacheSettings.resolveAuto(physicalMemoryBytes: twoGB, availableMemoryBytes: mb100),
+            PlaybackCacheSettings(forwardBuffer: "64MiB", backBuffer: "16MiB")
+        )
+        XCTAssertEqual(
+            PlaybackCacheProfile.resolveAutoSegments(physicalMemoryBytes: twoGB, availableMemoryBytes: mb100),
+            4
+        )
     }
 
     @MainActor
@@ -1135,6 +1472,105 @@ final class CatalogWatchedPolicyTests: XCTestCase {
             overview: nil,
             released: released,
             rating: nil
+        )
+    }
+}
+
+final class WatchedEpisodeSummaryTests: XCTestCase {
+    func testCountsOnlyAiredRegularEpisodes() {
+        let videos = [
+            episode(season: 0, episode: 1, released: "2000-01-01"),
+            episode(season: 1, episode: 1, released: "2000-01-01"),
+            episode(season: 1, episode: 2, released: "2000-01-02"),
+            episode(season: 1, episode: 3, released: "2999-01-01"),
+            episode(season: 2, episode: 1, released: "2000-02-01"),
+        ]
+
+        guard let summary = WatchedEpisodeSummary.make(
+            videos: videos,
+            watchedEpisodeKeys: ["1:1", "2:1"]
+        ) else {
+            XCTFail("Expected an aired episode summary")
+            return
+        }
+
+        XCTAssertEqual(summary.watchedCount, 2)
+        XCTAssertEqual(summary.totalCount, 3)
+        XCTAssertEqual(summary.progress, 2.0 / 3.0, accuracy: 0.0001)
+    }
+
+    func testReturnsNilWhenThereAreNoAiredRegularEpisodes() {
+        let videos = [
+            episode(season: 0, episode: 1, released: "2000-01-01"),
+            episode(season: 1, episode: 1, released: "2999-01-01"),
+        ]
+
+        XCTAssertNil(
+            WatchedEpisodeSummary.make(
+                videos: videos,
+                watchedEpisodeKeys: ["1:1"]
+            )
+        )
+    }
+
+    private func episode(season: Int, episode: Int, released: String) -> NuvioVideo {
+        NuvioVideo(
+            id: "summary:\(season):\(episode)",
+            title: "Episode \(episode)",
+            season: season,
+            episode: episode,
+            thumbnail: nil,
+            overview: nil,
+            released: released,
+            rating: nil
+        )
+    }
+}
+
+final class TraktWatchedHistoryPaginationTests: XCTestCase {
+    func testShortNonEmptyPageWithoutHeaderStillContinues() {
+        XCTAssertTrue(
+            TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: 1,
+                itemCount: 7,
+                pageCount: nil
+            )
+        )
+    }
+
+    func testEmptyPageStopsPagination() {
+        XCTAssertFalse(
+            TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: 2,
+                itemCount: 0,
+                pageCount: nil
+            )
+        )
+    }
+
+    func testPageCountAndMaximumPageStopPagination() {
+        XCTAssertFalse(
+            TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: 3,
+                itemCount: 250,
+                pageCount: 3
+            )
+        )
+        XCTAssertFalse(
+            TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: TraktWatchedHistoryPagination.maxPages,
+                itemCount: 250,
+                pageCount: nil
+            )
+        )
+    }
+
+    func testReadsPaginationHeader() {
+        XCTAssertEqual(
+            TraktWatchedHistoryPagination.pageCount(
+                from: ["x-pagination-page-count": "4, 4"]
+            ),
+            4
         )
     }
 }
@@ -2967,6 +3403,52 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
         XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 1, episode: 3))
     }
 
+    func testLastPlaybackStreamStoreTTLExpiredRemoteStreamReturnsNil() {
+        let metaId = "tt-ttl-stream-test"
+        let savedDate = Date(timeIntervalSince1970: 1000)
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: "https://debrid.example.com/stream.mkv",
+            httpHeaders: [:],
+            season: 2,
+            episode: 5,
+            savedAt: savedDate
+        )
+
+        // Loading within TTL (1 hour later) returns the stream
+        let freshDate = savedDate.addingTimeInterval(3600)
+        let freshLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate)
+        XCTAssertNotNil(freshLoad)
+        XCTAssertEqual(freshLoad?.url, "https://debrid.example.com/stream.mkv")
+
+        // Loading past TTL (3 hours later) returns nil and evicts the entry
+        let expiredDate = savedDate.addingTimeInterval(10800)
+        let expiredLoad = LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: expiredDate)
+        XCTAssertNil(expiredLoad)
+
+        // Subsequent lookup even at fresh time is now nil because it was evicted
+        XCTAssertNil(LastPlaybackStreamStore.load(metaId: metaId, season: 2, episode: 5, now: freshDate))
+    }
+
+    func testLastPlaybackStreamStoreLocalStreamsDoNotExpire() {
+        let metaId = "tt-local-stream-test"
+        let savedDate = Date(timeIntervalSince1970: 1000)
+        LastPlaybackStreamStore.save(
+            metaId: metaId,
+            url: "smb://192.168.1.50/share/movie.mkv",
+            httpHeaders: [:],
+            season: nil,
+            episode: nil,
+            savedAt: savedDate
+        )
+
+        // 24 hours later, local stream is still valid
+        let nextDay = savedDate.addingTimeInterval(86400)
+        let loaded = LastPlaybackStreamStore.load(metaId: metaId, season: nil, episode: nil, now: nextDay)
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(loaded?.url, "smb://192.168.1.50/share/movie.mkv")
+    }
+
     @MainActor
     func testTraktAndSimklContinueWatchingCheckpointsPreserveResumePosition() async {
         let series = makeSeries()
@@ -3003,5 +3485,100 @@ final class ContinueWatchingDismissStoreTests: XCTestCase {
         XCTAssertEqual(resolvedSimkl?.duration, 2400)
         XCTAssertEqual(resolvedSimkl?.remainingText, "20m left")
     }
-}
 
+    @MainActor
+    func testNowPlayingArtworkResolutionForMoviesAndEpisodes() {
+        let coordinator = PlaybackSessionCoordinator(aetherControllerFactory: { nil }, engineSettingProvider: { "AetherEngine" }, loadDispatcher: { _, _, _ in })
+        let model = PlayerViewModel(sessionCoordinator: coordinator)
+
+        // 1. Movie with poster and backdrop prefers poster
+        let movie = NuvioMeta(
+            id: "tt1375666",
+            name: "Inception",
+            description: "A thief who steals corporate secrets...",
+            posterUrl: "https://image.tmdb.org/t/p/w500/poster.jpg",
+            backgroundUrl: "https://image.tmdb.org/t/p/w1280/backdrop.jpg",
+            logoUrl: nil,
+            imdbId: "tt1375666",
+            tmdbId: 27205,
+            type: "movie",
+            year: 2010,
+            genres: ["Action", "Sci-Fi"],
+            rating: 8.8,
+            releaseInfo: "2010",
+            runtime: "148 min",
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil,
+            status: nil,
+            videos: nil,
+            trailerYtIds: nil,
+            externalRatings: nil,
+            posterShape: nil
+        )
+        let movieArtwork = model.resolveArtworkURL(for: movie, episode: nil, isTrailer: false)
+        XCTAssertEqual(movieArtwork, URL(string: "https://image.tmdb.org/t/p/w500/poster.jpg"))
+
+        // 2. Series episode with thumbnail prefers episode thumbnail
+        let ep1 = NuvioVideo(
+            id: "tt0903747:1:1",
+            title: "Pilot",
+            season: 1,
+            episode: 1,
+            thumbnail: "https://image.tmdb.org/t/p/w500/ep1_thumb.jpg",
+            overview: "A high school chemistry teacher...",
+            released: "2008-01-20",
+            rating: "9.0"
+        )
+        let series = NuvioMeta(
+            id: "tt0903747",
+            name: "Breaking Bad",
+            description: "A chemistry teacher diagnosed with inoperable lung cancer...",
+            posterUrl: "https://image.tmdb.org/t/p/w500/series_poster.jpg",
+            backgroundUrl: "https://image.tmdb.org/t/p/w1280/series_backdrop.jpg",
+            logoUrl: nil,
+            imdbId: "tt0903747",
+            tmdbId: 1396,
+            type: "series",
+            year: 2008,
+            genres: ["Drama", "Crime"],
+            rating: 9.5,
+            releaseInfo: "2008-2013",
+            runtime: "47 min",
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil,
+            status: "Ended",
+            videos: [ep1],
+            trailerYtIds: nil,
+            externalRatings: nil,
+            posterShape: nil
+        )
+        let ep1Artwork = model.resolveArtworkURL(for: series, episode: ep1, isTrailer: false)
+        XCTAssertEqual(ep1Artwork, URL(string: "https://image.tmdb.org/t/p/w500/ep1_thumb.jpg"))
+
+        // 3. Series episode without thumbnail falls back to series background
+        let ep2NoThumb = NuvioVideo(
+            id: "tt0903747:1:2",
+            title: "Cat's in the Bag...",
+            season: 1,
+            episode: 2,
+            thumbnail: nil,
+            overview: nil,
+            released: nil,
+            rating: nil
+        )
+        let ep2Artwork = model.resolveArtworkURL(for: series, episode: ep2NoThumb, isTrailer: false)
+        XCTAssertEqual(ep2Artwork, URL(string: "https://image.tmdb.org/t/p/w1280/series_backdrop.jpg"))
+
+        // 4. Trailer uses movie poster/backdrop
+        let trailerArtwork = model.resolveArtworkURL(for: movie, episode: nil, isTrailer: true)
+        XCTAssertEqual(trailerArtwork, URL(string: "https://image.tmdb.org/t/p/w500/poster.jpg"))
+    }
+}

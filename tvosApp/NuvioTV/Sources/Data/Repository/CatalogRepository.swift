@@ -268,8 +268,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
             .sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: ",")
+        let customTitles = TVHomeCatalogOrder.customCatalogTitles()
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ",")
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
-        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] order:[\(order)] showType:\(showType)"
+        return "cinemeta:\(cinemetaEnabled) simklPlan:\(simklPlanEnabled) urls:[\(urls)] disabled:[\(disabled)] order:[\(order)] customTitles:[\(customTitles)] showType:\(showType)"
     }
     private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
     private static var cachedMetaById: [String: NuvioMeta] = [:]
@@ -389,11 +393,13 @@ final class CinemetaCatalogRepository: CatalogRepository {
         homeCatalogLoadWasPartial = false
         homeCatalogFailureSignature = nil
         let cinemetaEnabled = Self.isCinemetaEnabled
+        let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+        let customTitles = TVHomeCatalogOrder.customCatalogTitles()
         let specs: [(id: String, name: String, type: String, catalogId: String)] = [
-            ("movie_top", "Popular - Movies", "movie", "top"),
-            ("series_top", "Popular - Series", "series", "top"),
-            ("movie_rating", "Top Rated - Movies", "movie", "imdbRating"),
-            ("series_rating", "Top Rated - Series", "series", "imdbRating")
+            ("movie_top", TVHomeCatalogOrder.catalogDisplayTitle("Popular", contentType: "movie", showType: showType, addonName: Self.cinemetaDisplayName, customTitle: customTitles[TVHomeCatalogOrder.catalogSettingsKey(addonId: Self.cinemetaAddonId, contentType: "movie", catalogId: "top")]), "movie", "top"),
+            ("series_top", TVHomeCatalogOrder.catalogDisplayTitle("Popular", contentType: "series", showType: showType, addonName: Self.cinemetaDisplayName, customTitle: customTitles[TVHomeCatalogOrder.catalogSettingsKey(addonId: Self.cinemetaAddonId, contentType: "series", catalogId: "top")]), "series", "top"),
+            ("movie_rating", TVHomeCatalogOrder.catalogDisplayTitle("Top Rated", contentType: "movie", showType: showType, addonName: Self.cinemetaDisplayName, customTitle: customTitles[TVHomeCatalogOrder.catalogSettingsKey(addonId: Self.cinemetaAddonId, contentType: "movie", catalogId: "imdbRating")]), "movie", "imdbRating"),
+            ("series_rating", TVHomeCatalogOrder.catalogDisplayTitle("Top Rated", contentType: "series", showType: showType, addonName: Self.cinemetaDisplayName, customTitle: customTitles[TVHomeCatalogOrder.catalogSettingsKey(addonId: Self.cinemetaAddonId, contentType: "series", catalogId: "imdbRating")]), "series", "imdbRating")
         ]
 
         // Load the independent Cinemeta rows concurrently. Previously one
@@ -426,6 +432,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // ones Settings writes locally. Without this, hiding "Popular - Movies"
         // was the one toggle Home ignored.
         let disabledBuiltInKeys = TVHomeCatalogOrder.disabledCatalogKeys()
+        let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
+        let collectionSources = CatalogHomeVisibilityResolver.activeCollectionSources()
 
         func builtInCatalogs() -> [NuvioCatalog] {
             guard cinemetaEnabled else { return [] }
@@ -460,7 +468,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // Publish the base rows now. Add-on catalogs can be slow or numerous;
         // they must not hold already-loaded rows off Home.
         var catalogs = builtInCatalogs()
-        let simklCatalogs = await simklPlanToWatchCatalogs()
+        let simklCatalogs = await simklPlanToWatchCatalogs(
+            collectionSources: collectionSources,
+            activeHomeKeys: activeHomeKeys
+        )
         catalogs.append(contentsOf: simklCatalogs)
         if !catalogs.isEmpty {
             onUpdate?(catalogs)
@@ -494,22 +505,46 @@ final class CinemetaCatalogRepository: CatalogRepository {
             try Task.checkCancellation()
         }
 
-        let retriedBuiltIns = builtInCatalogs() + (await simklPlanToWatchCatalogs())
+        let retriedBuiltIns = builtInCatalogs() + (await simklPlanToWatchCatalogs(
+            collectionSources: collectionSources,
+            activeHomeKeys: activeHomeKeys
+        ))
         if retriedBuiltIns.count != catalogs.count {
             catalogs = retriedBuiltIns
             onUpdate?(catalogs)
         }
 
-        // Each successful add-on row is appended and published immediately.
-        // A failed sibling no longer prevents later catalogs from appearing.
+        // Each successful add-on row is accumulated immediately, but Home is
+        // updated at most once per short interval. Add-on manifests can expose
+        // dozens of catalogs; publishing every serial response makes SwiftUI
+        // diff and lay out the entire vertical tree once per catalog.
         var progressiveAddonCatalogs: [NuvioCatalog] = []
-        let addonResult = await addonHomeCatalogs { [weak self] catalog in
+        var lastProgressiveUpdateAt: UInt64?
+        var lastProgressiveUpdateCount = 0
+        let progressiveUpdateIntervalNanoseconds: UInt64 = 600_000_000
+        let addonResult = await addonHomeCatalogs(
+            collectionSources: collectionSources,
+            activeHomeKeys: activeHomeKeys
+        ) { [weak self] catalog in
             guard let self else { return }
             progressiveAddonCatalogs.append(catalog)
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard lastProgressiveUpdateAt == nil
+                || now - (lastProgressiveUpdateAt ?? 0) >= progressiveUpdateIntervalNanoseconds else {
+                return
+            }
+            lastProgressiveUpdateAt = now
+            lastProgressiveUpdateCount = progressiveAddonCatalogs.count
             onUpdate?(catalogs + self.orderedAddonCatalogs(progressiveAddonCatalogs))
         }
         try Task.checkCancellation()
         catalogs.append(contentsOf: addonResult.catalogs)
+        // Always publish the complete final tree when the last response fell
+        // inside the throttle window. This also makes the next Home snapshot
+        // reflect every catalog, not just the last timed update.
+        if lastProgressiveUpdateCount != addonResult.catalogs.count {
+            onUpdate?(catalogs)
+        }
         let missingBuiltIns = pages.indices
             .filter { pages[$0] == nil }
             .map(String.init)
@@ -524,12 +559,17 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return catalogs
     }
 
-    private func simklPlanToWatchCatalogs() async -> [NuvioCatalog] {
+    private func simklPlanToWatchCatalogs(
+        collectionSources: [CatalogHomeVisibilityResolver.Source]? = nil,
+        activeHomeKeys: Set<String>? = nil
+    ) async -> [NuvioCatalog] {
         guard SimklSettingsStore.isPlanToWatchHomeCatalogsEnabled,
               SimklRuntimeSession.authenticatedState() != nil else {
             return []
         }
         let disabledKeys = TVHomeCatalogOrder.disabledCatalogKeys()
+        let activeKeys = activeHomeKeys ?? Set(TVHomeCatalogOrder.effectiveOrderKeys())
+        let sources = collectionSources ?? CatalogHomeVisibilityResolver.activeCollectionSources()
         let movieKey = TVHomeCatalogOrder.catalogSettingsKey(
             addonId: "simkl",
             contentType: "movie",
@@ -541,6 +581,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
             catalogId: "plantowatch"
         )
         let showType = ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+        let customTitles = TVHomeCatalogOrder.customCatalogTitles()
 
         var result: [NuvioCatalog] = []
 
@@ -554,7 +595,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 let title = TVHomeCatalogOrder.catalogDisplayTitle(
                     "Plan to Watch",
                     contentType: "movie",
-                    showType: showType
+                    showType: showType,
+                    addonName: "Simkl",
+                    customTitle: customTitles[movieKey]
                 )
                 result.append(
                     NuvioCatalog(
@@ -582,7 +625,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 let title = TVHomeCatalogOrder.catalogDisplayTitle(
                     "Plan to Watch",
                     contentType: "series",
-                    showType: showType
+                    showType: showType,
+                    addonName: "Simkl",
+                    customTitle: customTitles[seriesKey]
                 )
                 result.append(
                     NuvioCatalog(
@@ -609,20 +654,15 @@ final class CinemetaCatalogRepository: CatalogRepository {
     /// only catalogs and ones needing unsupported extras are skipped; a
     /// required genre is satisfied with the catalog's first declared option.
     private func addonHomeCatalogs(
+        collectionSources: [CatalogHomeVisibilityResolver.Source]? = nil,
+        activeHomeKeys: Set<String>? = nil,
         onCatalogLoaded: ((NuvioCatalog) -> Void)? = nil
     ) async -> (catalogs: [NuvioCatalog], hadFailures: Bool) {
         // Catalogs the user hid from Home on another device (synced from the
         // account). Their key format matches the tvOS catalog id sans `addon_`.
         let disabledCatalogKeys = TVHomeCatalogOrder.disabledCatalogKeys()
-        let activeHomeKeys = Set(TVHomeCatalogOrder.effectiveOrderKeys())
-        let collectionSources: [CatalogHomeVisibilityResolver.Source] = CollectionsStore.collections().flatMap { collection in
-            collection.folders.flatMap { $0.resolvedSources }
-                .filter { $0.normalizedProvider == "addon" }
-                .compactMap { source in
-                    guard let addonId = source.addonId, let type = source.type, let catalogId = source.catalogId else { return nil }
-                    return CatalogHomeVisibilityResolver.Source(addonIdentifier: addonId, contentType: type, catalogID: catalogId, collectionID: collection.id)
-                }
-        }
+        let activeHomeKeys = activeHomeKeys ?? Set(TVHomeCatalogOrder.effectiveOrderKeys())
+        let collectionSources = collectionSources ?? CatalogHomeVisibilityResolver.activeCollectionSources()
         var catalogs: [NuvioCatalog] = []
         var reports: [String] = []
         var hadFailures = false
@@ -642,14 +682,6 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let eligible = (manifest.catalogs ?? []).filter { catalog in
                 guard catalog.eligibleForHome else { return false }
                 let key = "\(manifest.id)_\(catalog.type)_\(catalog.id)"
-                guard CatalogHomeVisibilityResolver.shouldInclude(
-                    addonID: manifest.id,
-                    contentType: catalog.type,
-                    catalogID: catalog.id,
-                    collectionSources: collectionSources,
-                    manifestURL: manifestURL,
-                    explicitHomeKeys: activeHomeKeys
-                ) else { return false }
                 guard !disabledCatalogKeys.contains(key) else {
                     return false
                 }
@@ -671,10 +703,19 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     let items = response.metas.map { $0.toMeta(fallbackType: catalog.type) }
                     guard !items.isEmpty else { return nil }
                     cacheMetadata(items)
+                    let catalogKey = TVHomeCatalogOrder.catalogSettingsKey(
+                        addonId: manifest.id,
+                        contentType: catalog.type,
+                        catalogId: catalog.id
+                    )
+                    let customTitle = TVHomeCatalogOrder.customTitle(forCatalogKey: catalogKey)
+                    let addonDisplayName = manifest.displayName ?? Self.streamAddonName(for: manifestURL)
                     let catalogName = TVHomeCatalogOrder.catalogDisplayTitle(
                         catalog.name ?? catalog.id,
                         contentType: catalog.type,
-                        showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true
+                        showType: ProfileSettings.current.object(forKey: SettingsKey.homeCatalogShowType) as? Bool ?? true,
+                        addonName: addonDisplayName,
+                        customTitle: customTitle
                     )
                     return NuvioCatalog(
                         id: "addon_\(manifest.id)_\(catalog.type)_\(catalog.id)",
@@ -685,8 +726,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                         contentType: catalog.type,
                         catalogId: catalog.id,
                         addonId: manifest.id,
-                        addonName: manifest.displayName ?? Self.streamAddonName(for: manifestURL),
-                        catalogGenre: catalogGenre
+                        addonName: addonDisplayName,
+                        catalogGenre: catalogGenre,
+                        posterShape: catalog.posterShape ?? items.first(where: { $0.posterShape != nil })?.posterShape
                     )
                 } catch {
                     return nil
@@ -1153,6 +1195,21 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     func streamsProgressively(id: String, type: String) -> AsyncStream<[NuvioStream]> {
+        streamsProgressively(
+            id: id,
+            type: type,
+            finishAfterStreamResults: false
+        )
+    }
+
+    /// Source pickers do not need to wait for the shared discovery job's
+    /// subtitle decoration phase. They can consume the stream list as each
+    /// add-on responds and finish once every stream group has settled.
+    func streamsProgressively(
+        id: String,
+        type: String,
+        finishAfterStreamResults: Bool
+    ) -> AsyncStream<[NuvioStream]> {
         // Bridge shared discovery into a progressive flat list for callers that
         // still observe AsyncStream. Observation cancel must NOT cancel the
         // shared job (returning from playback reuses it).
@@ -1188,7 +1245,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
                             lastLoading = snapshot.isAnyLoading
                             continuation.yield(streams)
                         }
-                        if !snapshot.isAnyLoading {
+                        let streamResultsResolved = snapshot.hasResolvedTargets
+                            && !snapshot.groups.contains(where: \.isLoading)
+                        if (finishAfterStreamResults && streamResultsResolved) || !snapshot.isAnyLoading {
                             break
                         }
                     }
@@ -1376,8 +1435,207 @@ final class CinemetaCatalogRepository: CatalogRepository {
         }
 
         let localized = await TmdbDetailsService.localizedMetadata(for: rawResults)
-        cacheMetadata(localized)
-        return localized
+        let deduplicated = Self.deduplicatedSearchResults(localized)
+        cacheMetadata(deduplicated)
+        return deduplicated
+    }
+
+    /// Search sources can identify the same title differently (for example,
+    /// one source returns `tt123...` while another returns `tmdb:123`). Match
+    /// canonical external ids first, then cross-match by canonical type, release
+    /// year, and title for entries whose external ids do not conflict. This keeps
+    /// remakes (different years) and movie/series pairs while removing duplicate posters.
+    static func deduplicatedSearchResults(_ items: [NuvioMeta]) -> [NuvioMeta] {
+        guard items.count > 1 else { return items }
+
+        var identityToIndex: [String: Int] = [:]
+        var fallbackKeyToIndex: [String: Int] = [:]
+        var result: [NuvioMeta] = []
+        result.reserveCapacity(items.count)
+
+        for item in items {
+            let canonicalIdentityKeys = searchIdentityKeys(for: item)
+            var identityKeys = canonicalIdentityKeys
+            let sourceID = normalizedSearchIdentity(item.id)
+            if !sourceID.isEmpty {
+                identityKeys.insert("source:\(item.canonicalType):\(sourceID)")
+            }
+            let fallbackKey = searchFallbackKey(for: item)
+            let itemIdentifiers = SearchCanonicalIdentifiers(from: item)
+
+            // 1. Direct canonical identity match (highest priority)
+            let matchIndexByIdentity = identityKeys.compactMap { identityToIndex[$0] }.first
+
+            // 2. Fallback content match (type:year:normalizedTitle) when identity keys are disjoint
+            // across add-ons, provided canonical IDs don't conflict in the same namespace.
+            let matchIndexByFallback: Int? = {
+                guard let fallbackKey, let candidateIndex = fallbackKeyToIndex[fallbackKey] else { return nil }
+                let existingIdentifiers = SearchCanonicalIdentifiers(from: result[candidateIndex])
+                guard !itemIdentifiers.conflicts(with: existingIdentifiers) else { return nil }
+                return candidateIndex
+            }()
+
+            let existingIndex = matchIndexByIdentity ?? matchIndexByFallback
+
+            if let existingIndex {
+                // Merge any missing aliases or metadata from duplicate into the kept item
+                let existing = result[existingIndex]
+                let resolvedTmdb = existing.tmdbId ?? itemIdentifiers.tmdb
+                let resolvedImdb = existing.imdbId ?? itemIdentifiers.imdb
+                let resolvedPoster = existing.posterUrl ?? item.posterUrl
+                let resolvedBackdrop = existing.backgroundUrl ?? item.backgroundUrl
+                let resolvedLogo = existing.logoUrl ?? item.logoUrl
+                let resolvedYear = existing.year ?? item.year ?? parsedYear(from: item.releaseInfo)
+
+                if resolvedTmdb != existing.tmdbId
+                    || resolvedImdb != existing.imdbId
+                    || resolvedPoster != existing.posterUrl
+                    || resolvedBackdrop != existing.backgroundUrl
+                    || resolvedLogo != existing.logoUrl
+                    || resolvedYear != existing.year {
+                    result[existingIndex] = NuvioMeta(
+                        id: existing.id,
+                        name: existing.name,
+                        description: existing.description ?? item.description,
+                        posterUrl: resolvedPoster,
+                        backgroundUrl: resolvedBackdrop,
+                        logoUrl: resolvedLogo,
+                        imdbId: resolvedImdb,
+                        tmdbId: resolvedTmdb,
+                        type: existing.type,
+                        year: resolvedYear,
+                        genres: existing.genres ?? item.genres,
+                        rating: existing.rating ?? item.rating,
+                        releaseInfo: existing.releaseInfo ?? item.releaseInfo,
+                        runtime: existing.runtime ?? item.runtime,
+                        cast: existing.cast ?? item.cast,
+                        director: existing.director ?? item.director,
+                        writer: existing.writer ?? item.writer,
+                        certification: existing.certification ?? item.certification,
+                        country: existing.country ?? item.country,
+                        released: existing.released ?? item.released,
+                        status: existing.status ?? item.status,
+                        videos: existing.videos ?? item.videos,
+                        trailerYtIds: existing.trailerYtIds ?? item.trailerYtIds,
+                        externalRatings: existing.externalRatings ?? item.externalRatings
+                    )
+                }
+
+                // Register all identity keys (including newly learned canonical keys) to existing index
+                let updatedCanonicalKeys = searchIdentityKeys(for: result[existingIndex])
+                for key in updatedCanonicalKeys.union(identityKeys) {
+                    identityToIndex[key] = existingIndex
+                }
+                if let fallbackKey, fallbackKeyToIndex[fallbackKey] == nil {
+                    fallbackKeyToIndex[fallbackKey] = existingIndex
+                }
+            } else {
+                let newIndex = result.count
+                result.append(item)
+                for key in identityKeys {
+                    identityToIndex[key] = newIndex
+                }
+                if let fallbackKey {
+                    fallbackKeyToIndex[fallbackKey] = newIndex
+                }
+            }
+        }
+        return result
+    }
+
+    private struct SearchCanonicalIdentifiers {
+        let imdb: String?
+        let tmdb: Int?
+        let trakt: Int?
+        let tvdb: Int?
+        let kitsu: Int?
+        let mal: Int?
+
+        init(from meta: NuvioMeta) {
+            self.imdb = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? "")
+                ?? NuvioMeta.canonicalImdbID(from: meta.id)
+            self.tmdb = meta.tmdbId ?? CinemetaCatalogRepository.prefixedNumericID(from: meta.id, prefix: "tmdb")
+            self.trakt = CinemetaCatalogRepository.prefixedNumericID(from: meta.id, prefix: "trakt")
+            self.tvdb = CinemetaCatalogRepository.prefixedNumericID(from: meta.id, prefix: "tvdb")
+            self.kitsu = CinemetaCatalogRepository.prefixedNumericID(from: meta.id, prefix: "kitsu")
+            self.mal = CinemetaCatalogRepository.prefixedNumericID(from: meta.id, prefix: "mal")
+        }
+
+        func conflicts(with other: SearchCanonicalIdentifiers) -> Bool {
+            if let a = imdb, let b = other.imdb, a.caseInsensitiveCompare(b) != .orderedSame {
+                return true
+            }
+            if let a = tmdb, let b = other.tmdb, a != b {
+                return true
+            }
+            if let a = trakt, let b = other.trakt, a != b {
+                return true
+            }
+            if let a = tvdb, let b = other.tvdb, a != b {
+                return true
+            }
+            if let a = kitsu, let b = other.kitsu, a != b {
+                return true
+            }
+            if let a = mal, let b = other.mal, a != b {
+                return true
+            }
+            return false
+        }
+    }
+
+    private static func searchIdentityKeys(for meta: NuvioMeta) -> Set<String> {
+        let type = meta.canonicalType
+        var keys = Set<String>()
+
+        if let imdb = NuvioMeta.canonicalImdbID(from: meta.imdbId ?? "")
+            ?? NuvioMeta.canonicalImdbID(from: meta.id) {
+            keys.insert("imdb:\(imdb)")
+        }
+        if let tmdb = meta.tmdbId ?? prefixedNumericID(from: meta.id, prefix: "tmdb") {
+            keys.insert("tmdb:\(type):\(tmdb)")
+        }
+        for prefix in ["trakt", "tvdb", "kitsu", "mal"] {
+            if let value = prefixedNumericID(from: meta.id, prefix: prefix) {
+                keys.insert("\(prefix):\(type):\(value)")
+            }
+        }
+
+        return keys
+    }
+
+    private static func searchFallbackKey(for meta: NuvioMeta) -> String? {
+        let year = meta.year ?? parsedYear(from: meta.releaseInfo)
+        guard let year, year > 0 else { return nil }
+        let title = meta.name
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+        guard !title.isEmpty else { return nil }
+        return "\(meta.canonicalType):\(year):\(title)"
+    }
+
+    private static func parsedYear(from releaseInfo: String?) -> Int? {
+        guard let releaseInfo else { return nil }
+        let trimmed = releaseInfo.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = trimmed.prefix(4)
+        return Int(digits)
+    }
+
+    private static func prefixedNumericID(from value: String, prefix: String) -> Int? {
+        let parts = value.split(separator: ":", omittingEmptySubsequences: true)
+        guard parts.count >= 2,
+              parts[0].caseInsensitiveCompare(prefix) == .orderedSame else {
+            return nil
+        }
+        return parts.dropFirst().compactMap { Int($0) }.first(where: { $0 > 0 })
+    }
+
+    private static func normalizedSearchIdentity(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
     }
 
     func browseCatalog(
@@ -1985,6 +2243,24 @@ struct AddonManifestCatalog: Decodable {
     let extra: [AddonManifestCatalogExtra]?
     /// Legacy manifest field predating the structured `extra` array.
     let extraRequired: [String]?
+    let posterShape: String?
+
+    enum CodingKeys: String, CodingKey {
+        case type, id, name, extra, extraRequired
+        case posterShape
+        case poster_shape
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decode(String.self, forKey: .type)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        extra = try container.decodeIfPresent([AddonManifestCatalogExtra].self, forKey: .extra)
+        extraRequired = try container.decodeIfPresent([String].self, forKey: .extraRequired)
+        posterShape = try container.decodeIfPresent(String.self, forKey: .posterShape)
+            ?? container.decodeIfPresent(String.self, forKey: .poster_shape)
+    }
 
     /// Mirrors the Android app's `shouldShowOnHome()`: search-only catalogs
     /// belong to the Search tab, and a catalog whose required extras we can't
@@ -2189,6 +2465,7 @@ struct CinemetaMeta: Decodable {
     let trailers: [CinemetaTrailer]?
     let trailerStreams: [CinemetaTrailerStream]?
     let imdbId: String?
+    let posterShape: String?
 
     enum CodingKeys: String, CodingKey {
         case id, name, type, description, poster, background, logo, imdbRating
@@ -2196,6 +2473,38 @@ struct CinemetaMeta: Decodable {
         case status, videos, trailers, trailerStreams
         case moviedbId = "moviedb_id"
         case imdbId = "imdb_id"
+        case posterShape
+        case poster_shape
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = (try? container.decode(String.self, forKey: .name)) ?? ""
+        type = try? container.decodeIfPresent(String.self, forKey: .type)
+        description = try? container.decodeIfPresent(String.self, forKey: .description)
+        poster = try? container.decodeIfPresent(String.self, forKey: .poster)
+        background = try? container.decodeIfPresent(String.self, forKey: .background)
+        logo = try? container.decodeIfPresent(String.self, forKey: .logo)
+        imdbRating = try? container.decodeIfPresent(FlexibleString.self, forKey: .imdbRating)
+        genres = try? container.decodeIfPresent([String].self, forKey: .genres)
+        genre = try? container.decodeIfPresent([String].self, forKey: .genre)
+        releaseInfo = try? container.decodeIfPresent(String.self, forKey: .releaseInfo)
+        year = try? container.decodeIfPresent(String.self, forKey: .year)
+        runtime = try? container.decodeIfPresent(String.self, forKey: .runtime)
+        cast = try? container.decodeIfPresent(FlexibleStringArray.self, forKey: .cast)
+        director = try? container.decodeIfPresent(FlexibleStringArray.self, forKey: .director)
+        writer = try? container.decodeIfPresent(FlexibleStringArray.self, forKey: .writer)
+        country = try? container.decodeIfPresent(String.self, forKey: .country)
+        released = try? container.decodeIfPresent(String.self, forKey: .released)
+        moviedbId = try? container.decodeIfPresent(Int.self, forKey: .moviedbId)
+        status = try? container.decodeIfPresent(String.self, forKey: .status)
+        videos = try? container.decodeIfPresent([CinemetaVideo].self, forKey: .videos)
+        trailers = try? container.decodeIfPresent([CinemetaTrailer].self, forKey: .trailers)
+        trailerStreams = try? container.decodeIfPresent([CinemetaTrailerStream].self, forKey: .trailerStreams)
+        imdbId = try? container.decodeIfPresent(String.self, forKey: .imdbId)
+        posterShape = (try? container.decodeIfPresent(String.self, forKey: .posterShape))
+            ?? (try? container.decodeIfPresent(String.self, forKey: .poster_shape))
     }
 
     func toMeta(fallbackType: String) -> NuvioMeta {
@@ -2222,7 +2531,9 @@ struct CinemetaMeta: Decodable {
             released: released,
             status: status,
             videos: videos?.compactMap { $0.toVideo() },
-            trailerYtIds: trailerYtIds
+            trailerYtIds: trailerYtIds,
+            externalRatings: nil,
+            posterShape: posterShape
         )
     }
 

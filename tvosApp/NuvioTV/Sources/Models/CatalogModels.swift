@@ -27,6 +27,15 @@ struct NuvioCatalog: Identifiable, Codable {
     let addonName: String?
     /// Required genre extra used for the initial add-on request, if any.
     let catalogGenre: String?
+    /// Preferred poster shape for items in this catalog ("landscape", "square", "poster").
+    let posterShape: String?
+
+    var tileShape: CollectionTileShape {
+        if let posterShape {
+            return CollectionTileShape.fromStored(posterShape, fallback: .poster)
+        }
+        return items?.first(where: { $0.tileShape != .poster })?.tileShape ?? .poster
+    }
 
     init(
         id: String,
@@ -38,7 +47,8 @@ struct NuvioCatalog: Identifiable, Codable {
         catalogId: String? = nil,
         addonId: String? = nil,
         addonName: String? = nil,
-        catalogGenre: String? = nil
+        catalogGenre: String? = nil,
+        posterShape: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -50,6 +60,7 @@ struct NuvioCatalog: Identifiable, Codable {
         self.addonId = addonId
         self.addonName = addonName
         self.catalogGenre = catalogGenre
+        self.posterShape = posterShape
     }
 }
 
@@ -93,6 +104,12 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
     /// This is transient enrichment and is intentionally omitted from compact
     /// library/watch-state snapshots.
     let externalRatings: [NuvioExternalRating]?
+    /// Card shape from add-on metadata ("landscape", "square", "poster").
+    let posterShape: String?
+
+    var tileShape: CollectionTileShape {
+        CollectionTileShape.fromStored(posterShape, fallback: .poster)
+    }
 
     static func isSeriesType(_ type: String) -> Bool {
         let normalized = type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -171,7 +188,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: nil,
             trailerYtIds: trailerYtIds,
-            externalRatings: nil
+            externalRatings: nil,
+            posterShape: posterShape
         )
     }
 
@@ -244,7 +262,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: resolvedStatus,
             videos: videos,
             trailerYtIds: trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape ?? fullMeta.posterShape
         )
     }
 
@@ -287,7 +306,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             // after background enrichment, without another metadata fetch.
             videos: videos ?? fullMeta.videos,
             trailerYtIds: trailerYtIds ?? fullMeta.trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape ?? fullMeta.posterShape
         )
     }
 
@@ -316,7 +336,8 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: videos,
             trailerYtIds: trailerYtIds,
-            externalRatings: ratings.isEmpty ? nil : ratings
+            externalRatings: ratings.isEmpty ? nil : ratings,
+            posterShape: posterShape
         )
     }
 
@@ -348,35 +369,37 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
             status: status,
             videos: videosToUse,
             trailerYtIds: trailerYtIds,
-            externalRatings: externalRatings
+            externalRatings: externalRatings,
+            posterShape: posterShape
         )
     }
 
     init(
         id: String,
         name: String,
-        description: String?,
-        posterUrl: String?,
-        backgroundUrl: String?,
-        logoUrl: String?,
-        imdbId: String?,
-        tmdbId: Int?,
+        description: String? = nil,
+        posterUrl: String? = nil,
+        backgroundUrl: String? = nil,
+        logoUrl: String? = nil,
+        imdbId: String? = nil,
+        tmdbId: Int? = nil,
         type: String,
-        year: Int?,
-        genres: [String]?,
-        rating: Double?,
-        releaseInfo: String?,
-        runtime: String?,
-        cast: [String]?,
-        director: [String]?,
-        writer: [String]?,
-        certification: String?,
-        country: String?,
-        released: String?,
+        year: Int? = nil,
+        genres: [String]? = nil,
+        rating: Double? = nil,
+        releaseInfo: String? = nil,
+        runtime: String? = nil,
+        cast: [String]? = nil,
+        director: [String]? = nil,
+        writer: [String]? = nil,
+        certification: String? = nil,
+        country: String? = nil,
+        released: String? = nil,
         status: String? = nil,
         videos: [NuvioVideo]? = nil,
         trailerYtIds: [String]? = nil,
-        externalRatings: [NuvioExternalRating]? = nil
+        externalRatings: [NuvioExternalRating]? = nil,
+        posterShape: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -402,6 +425,7 @@ struct NuvioMeta: Identifiable, Codable, Equatable, Hashable {
         self.videos = videos
         self.trailerYtIds = trailerYtIds
         self.externalRatings = externalRatings
+        self.posterShape = posterShape
     }
 }
 
@@ -417,19 +441,37 @@ struct NuvioVideo: Identifiable, Codable, Hashable {
     let rating: String?
 }
 
-/// Canonical stream lookup identity for an episode. Episode guides can be
-/// enriched by TMDB (and therefore carry a `tmdb:` id) even when the stream
-/// add-ons use the series' IMDb id. Keep manual playback and autoplay on the
-/// same lookup identity.
-enum EpisodeStreamIdentity {
-    static func canonicalID(for episode: NuvioVideo, seriesStreamID: String?) -> String {
-        if episode.id.hasPrefix("tt") {
-            return episode.id
+extension NuvioMeta {
+    /// Returns the stream lookup id for an episode. Metadata enrichment can
+    /// replace Cinemeta's IMDb episode id with a TMDB id, while stream add-ons
+    /// still expect the parent series id plus season/episode.
+    func canonicalEpisodeStreamId(for video: NuvioVideo) -> String {
+        let rawId = video.id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parentId = streamId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffix = ":\(video.season):\(video.episode)"
+
+        if rawId.hasSuffix(suffix) {
+            let rawParentId = String(rawId.dropLast(suffix.count))
+            let rawIMDbId = Self.canonicalImdbID(from: rawParentId)
+            let metaIMDbId = Self.canonicalImdbID(from: parentId)
+
+            // Preserve a correctly namespaced IMDb id, but normalize its case.
+            if let rawIMDbId, rawIMDbId == metaIMDbId {
+                return "\(rawIMDbId)\(suffix)"
+            }
+
+            // Non-IMDb providers can be valid when the metadata uses the same
+            // provider namespace for the parent and the episode.
+            if metaIMDbId == nil,
+               rawParentId.caseInsensitiveCompare(parentId) == .orderedSame {
+                return rawId
+            }
         }
-        if let seriesStreamID, seriesStreamID.hasPrefix("tt") {
-            return "\(seriesStreamID):\(episode.season):\(episode.episode)"
+
+        if let metaIMDbId = Self.canonicalImdbID(from: parentId) {
+            return "\(metaIMDbId)\(suffix)"
         }
-        return episode.id
+        return rawId
     }
 }
 
@@ -638,22 +680,57 @@ enum EpisodeReleasePolicy {
 /// dated today or later does not hold back the badge until it has aired under
 /// the app's existing date-only release policy.
 enum CatalogWatchedPolicy {
+    static func airedRegularEpisodes(_ videos: [NuvioVideo]?) -> [NuvioVideo] {
+        (videos ?? []).filter {
+            $0.season > 0
+                && $0.episode > 0
+                && EpisodeReleasePolicy.hasAired($0.released)
+        }
+    }
+
     static func hasWatchedAllAiredEpisodes(
         videos: [NuvioVideo]?,
         watchedEpisodeKeys: Set<String>
     ) -> Bool {
-        guard let videos, !videos.isEmpty, !watchedEpisodeKeys.isEmpty else { return false }
-        var airedCount = 0
-        for video in videos {
-            guard video.season > 0, video.episode > 0 else { continue }
-            guard EpisodeReleasePolicy.hasAired(video.released) else { continue }
-            airedCount += 1
+        let episodes = airedRegularEpisodes(videos)
+        guard !episodes.isEmpty, !watchedEpisodeKeys.isEmpty else { return false }
+        for video in episodes {
             let key = "\(video.season):\(video.episode)"
             if !watchedEpisodeKeys.contains(key) {
                 return false
             }
         }
-        return airedCount > 0
+        return true
+    }
+}
+
+/// Aggregate watched progress for the Details episode section. The denominator
+/// intentionally matches catalog watched badges: regular aired episodes only,
+/// excluding specials and future releases.
+struct WatchedEpisodeSummary: Equatable {
+    let watchedCount: Int
+    let totalCount: Int
+
+    var progress: Double {
+        guard totalCount > 0 else { return 0 }
+        return Double(watchedCount) / Double(totalCount)
+    }
+
+    static func make(
+        videos: [NuvioVideo]?,
+        watchedEpisodeKeys: Set<String>
+    ) -> WatchedEpisodeSummary? {
+        let episodes = CatalogWatchedPolicy.airedRegularEpisodes(videos)
+        guard !episodes.isEmpty else { return nil }
+        let watchedCount = episodes.reduce(into: 0) { count, video in
+            if watchedEpisodeKeys.contains("\(video.season):\(video.episode)") {
+                count += 1
+            }
+        }
+        return WatchedEpisodeSummary(
+            watchedCount: watchedCount,
+            totalCount: episodes.count
+        )
     }
 }
 
@@ -765,9 +842,16 @@ struct NuvioStream: Identifiable, Codable {
     /// Stable identity for lists and focus. Prefer URL / torrent key; never mint a
     /// fresh UUID on each access (that forces full SwiftUI list rebuilds).
     var id: String {
-        if let url, !url.isEmpty { return url }
-        if let infoHash, !infoHash.isEmpty {
-            return "\(infoHash):\(fileIdx ?? -1)"
+        let parsed = TorrentSourceParser.parse(
+            url: url,
+            infoHash: infoHash,
+            fileIdx: fileIdx
+        )
+        if let directURL = parsed.directURL, !directURL.isEmpty {
+            return directURL
+        }
+        if let infoHash = parsed.infoHash, !infoHash.isEmpty {
+            return "\(infoHash):\(parsed.fileIdx ?? -1)"
         }
         // Deterministic content fallback for rare shells with no playable key.
         return "stream:\(name ?? "")|\(description ?? "")|\(addonName ?? "")|\(filename ?? "")"
@@ -781,8 +865,8 @@ struct NuvioStream: Identifiable, Codable {
     /// generic placeholder. `nil` when the add-on manifest has no logo.
     let addonLogoURL: String?
     /// Torrent info-hash from add-ons like Torrentio. Present when the add-on
-    /// returns a torrent instead of a direct URL; a debrid provider turns this
-    /// into a playable link. See `Core/Debrid`.
+    /// returns a torrent instead of a direct URL; Debrid or the local P2P
+    /// engine can turn it into a playable link. See `Core/Torrent`.
     let infoHash: String?
     /// Index of the wanted file inside the torrent (for multi-file torrents).
     let fileIdx: Int?
@@ -801,6 +885,8 @@ struct NuvioStream: Identifiable, Codable {
     /// `behaviorHints.proxyHeaders.request`. Some hosts reject playback without
     /// the add-on's Referer or User-Agent.
     let httpHeaders: [String: String]?
+    /// Direct storyboard/trickplay manifest URL (WebVTT) when supplied by the stream add-on.
+    let trickplayURL: URL?
 
     init(
         url: String?,
@@ -816,28 +902,59 @@ struct NuvioStream: Identifiable, Codable {
         videoSize: Int64? = nil,
         bingeGroup: String? = nil,
         isCached: Bool? = nil,
-        httpHeaders: [String: String]? = nil
+        httpHeaders: [String: String]? = nil,
+        trickplayURL: URL? = nil
     ) {
-        self.url = url
+        let parsed = TorrentSourceParser.parse(
+            url: url,
+            infoHash: infoHash,
+            fileIdx: fileIdx
+        )
+        self.url = parsed.directURL ?? (parsed.infoHash == nil ? url : nil)
         self.name = name
         self.description = description
         self.addonName = addonName
         self.subtitles = subtitles
         self.addonLogoURL = addonLogoURL
-        self.infoHash = infoHash
-        self.fileIdx = fileIdx
-        self.sources = sources
+        self.infoHash = parsed.infoHash
+        self.fileIdx = parsed.fileIdx
+        self.sources = TorrentSourceParser.normalizedTrackers(sources)
         self.filename = filename
         self.videoSize = videoSize
         self.bingeGroup = bingeGroup
         self.isCached = isCached
         self.httpHeaders = httpHeaders
+        self.trickplayURL = trickplayURL
     }
 
-    /// A stream that has no direct URL but carries a torrent info-hash: it must
-    /// be run through a debrid provider before it can play.
+    /// The direct HTTP URL, if this stream is not a magnet/torrent transport.
+    /// Computed from all supported forms so decoded legacy values behave like
+    /// streams normalized by `StreamAddonStreamDTO`.
+    var directURL: String? {
+        TorrentSourceParser.parse(url: url, infoHash: infoHash, fileIdx: fileIdx).directURL
+    }
+
+    /// The explicit or URL-embedded torrent hash.
+    var effectiveInfoHash: String? {
+        TorrentSourceParser.parse(url: url, infoHash: infoHash, fileIdx: fileIdx).infoHash
+    }
+
+    /// The explicit or URL-embedded file index.
+    var effectiveFileIdx: Int? {
+        TorrentSourceParser.parse(url: url, infoHash: infoHash, fileIdx: fileIdx).fileIdx
+    }
+
+    /// A stream that has no direct URL but carries a torrent info-hash. It can
+    /// be resolved by Debrid or streamed through the embedded P2P engine.
     var isDebridResolvable: Bool {
-        (url?.isEmpty ?? true) && (infoHash?.isEmpty == false)
+        let parsed = TorrentSourceParser.parse(url: url, infoHash: infoHash, fileIdx: fileIdx)
+        return parsed.directURL == nil && parsed.infoHash != nil
+    }
+
+    /// A stream that has no direct URL but carries a torrent info-hash: it can
+    /// be streamed directly via the embedded P2P BitTorrent engine.
+    var isTorrentStream: Bool {
+        isDebridResolvable
     }
 
     /// True when the stream is known or strongly labeled as debrid-cached.
@@ -996,7 +1113,7 @@ enum ContinueWatchingFeatureFlags {
     static let nextUpCardsEnabled = true
 }
 
-struct ContinueWatchingItem: Identifiable, Codable {
+struct ContinueWatchingItem: Identifiable, Codable, Equatable {
     var id: String { meta.id }
     let meta: NuvioMeta
     let streamUrl: String
@@ -1325,6 +1442,10 @@ struct ContinueWatchingItem: Identifiable, Codable {
             && episodeOverviewOverride == other.episodeOverviewOverride
             && episodeThumbnailOverride == other.episodeThumbnailOverride
             && upNextSeedSeason == other.upNextSeedSeason
+    }
+
+    static func == (lhs: ContinueWatchingItem, rhs: ContinueWatchingItem) -> Bool {
+        lhs.isContentEqual(to: rhs)
     }
 }
 
@@ -2148,8 +2269,9 @@ enum ContinueWatchingStore {
     private static let episodeResumeDirectoryName = "EpisodeResumePoints"
 
     private static func episodeResumePoints() -> [EpisodeResumePoint] {
-        guard let data = readEpisodeResumeData(forKey: episodeResumeStorageKey),
-              let decoded = try? makeDecoder().decode([EpisodeResumePoint].self, from: data) else {
+        guard let data = readEpisodeResumeData(forKey: episodeResumeStorageKey) else { return [] }
+        guard let decoded = try? makeDecoder().decode([EpisodeResumePoint].self, from: data) else {
+            LargePayloadStore.remove(key: episodeResumeStorageKey, directory: episodeResumeDirectoryName)
             return []
         }
         return decoded.sorted { $0.updatedAt > $1.updatedAt }
@@ -2331,29 +2453,33 @@ enum ContinueWatchingStore {
     /// the Top Shelf extension can render the Apple TV home row. No-op when the
     /// shared container isn't available.
     private static func writeTopShelfFeed() {
-        let entries = items().prefix(10).map { item -> TopShelfEntry in
-            let fraction = item.duration > 0 ? min(max(item.position / item.duration, 0), 1) : nil
-            var subtitleParts: [String] = []
-            if let season = item.season, let episode = item.episode {
-                subtitleParts.append("S\(season) · E\(episode)")
-            } else if let year = item.meta.year {
-                subtitleParts.append(String(year))
+        guard TopShelfFeedStore.isAvailable else { return }
+        let currentItems = Array(items().prefix(10))
+        Task.detached(priority: .utility) {
+            let entries = currentItems.map { item -> TopShelfEntry in
+                let fraction = item.duration > 0 ? min(max(item.position / item.duration, 0), 1) : nil
+                var subtitleParts: [String] = []
+                if let season = item.season, let episode = item.episode {
+                    subtitleParts.append("S\(season) · E\(episode)")
+                } else if let year = item.meta.year {
+                    subtitleParts.append(String(year))
+                }
+                if let remaining = remainingTimeText(
+                    seconds: max(0, item.duration - item.position)
+                ) {
+                    subtitleParts.append("\(remaining) left")
+                }
+                return TopShelfEntry(
+                    contentId: item.meta.id,
+                    contentType: item.meta.type,
+                    title: item.meta.name,
+                    subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: "  ·  "),
+                    imageURL: item.meta.posterUrl,
+                    progress: item.isUpNextEntry ? nil : fraction
+                )
             }
-            if let remaining = Self.remainingTimeText(
-                seconds: max(0, item.duration - item.position)
-            ) {
-                subtitleParts.append("\(remaining) left")
-            }
-            return TopShelfEntry(
-                contentId: item.meta.id,
-                contentType: item.meta.type,
-                title: item.meta.name,
-                subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: "  ·  "),
-                imageURL: item.meta.posterUrl,
-                progress: item.isUpNextEntry ? nil : fraction
-            )
+            TopShelfFeedStore.write(entries)
         }
-        TopShelfFeedStore.write(Array(entries))
     }
 
     private static func remainingTimeText(seconds: Double) -> String? {
@@ -2479,7 +2605,11 @@ enum ContinueWatchingStore {
     private static func data(for key: String) -> Data? {
         if let url = storageURL(for: key),
            let data = try? Data(contentsOf: url) {
-            return data
+            if data.isEmpty {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                return data
+            }
         }
 
         // Nothing in Caches: either this is the first read after an upgrade, or
@@ -2537,12 +2667,10 @@ enum ContinueWatchingStore {
     }
 
     private static func writeAndVerify(_ data: Data, to url: URL) throws {
-        _ = try makeDecoder().decode([ContinueWatchingItem].self, from: data)
         try write(data, to: url)
         guard let saved = try? Data(contentsOf: url), saved == data else {
             throw PersistenceError.verificationFailed
         }
-        _ = try makeDecoder().decode([ContinueWatchingItem].self, from: saved)
     }
 
     private static func fallbackMarkerKey(for key: String) -> String {
@@ -2749,9 +2877,23 @@ enum LibraryStore {
     private static let storageDirectoryName = "LibraryStore"
     private(set) static var activeProfileId: String?
 
+    private static let cacheLock = NSRecursiveLock()
+    private static var cachedItems: [LibraryStoreItem]?
+    private static var cachedKey: String?
+    private static var cachedItemKeys: Set<String>?
+
     static func setActiveProfile(_ profileId: String?) {
-        guard activeProfileId != profileId else { return }
+        cacheLock.lock()
+        let changed = (activeProfileId != profileId)
         activeProfileId = profileId
+        if changed {
+            cachedItems = nil
+            cachedKey = nil
+            cachedItemKeys = nil
+        }
+        cacheLock.unlock()
+
+        guard changed else { return }
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -2785,16 +2927,44 @@ enum LibraryStore {
     }
 
     static func items() -> [LibraryStoreItem] {
-        guard let data = readData(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([LibraryStoreItem].self, from: data) else {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let key = storageKey
+        if cachedKey == key, let cached = cachedItems {
+            return cached
+        }
+
+        guard let data = readData(forKey: key) else {
+            cachedItems = []
+            cachedKey = key
+            cachedItemKeys = []
+            return []
+        }
+        guard let decoded = try? JSONDecoder().decode([LibraryStoreItem].self, from: data) else {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
+            cachedItems = []
+            cachedKey = key
+            cachedItemKeys = []
             return []
         }
 
-        return decoded.sorted { $0.addedAt > $1.addedAt }
+        let sorted = decoded.sorted { $0.addedAt > $1.addedAt }
+        cachedItems = sorted
+        cachedKey = key
+        cachedItemKeys = Set(sorted.map { "\($0.meta.type.lowercased()):\($0.meta.id)" })
+        return sorted
     }
 
     static func contains(metaId: String, type: String) -> Bool {
-        items().contains { $0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame }
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+
+        let key = storageKey
+        if cachedKey != key || cachedItemKeys == nil {
+            _ = items()
+        }
+        return cachedItemKeys?.contains("\(type.lowercased()):\(metaId)") ?? false
     }
 
     @discardableResult
@@ -2843,13 +3013,28 @@ enum LibraryStore {
     }
 
     private static func persist(_ items: [LibraryStoreItem]) {
+        let key = storageKey
+        cacheLock.lock()
+        cachedItems = items
+        cachedKey = key
+        cachedItemKeys = Set(items.map { "\($0.meta.type.lowercased()):\($0.meta.id)" })
+        cacheLock.unlock()
+
         guard let data = try? JSONEncoder().encode(items) else { return }
-        _ = writeData(data, forKey: storageKey)
+        _ = writeData(data, forKey: key)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
     /// Deletes one profile's library, leaving every other profile alone.
     static func eraseProfile(_ profileId: String) {
+        cacheLock.lock()
+        if activeProfileId == profileId {
+            cachedItems = nil
+            cachedKey = nil
+            cachedItemKeys = nil
+        }
+        cacheLock.unlock()
+
         let key = storageKey(for: profileId)
         UserDefaults.standard.removeObject(forKey: key)
         LargePayloadStore.remove(key: key, directory: storageDirectoryName)
@@ -2858,6 +3043,12 @@ enum LibraryStore {
 
     /// Deletes every profile's library (and the legacy shared one) on sign-out.
     static func eraseAllProfiles() {
+        cacheLock.lock()
+        cachedItems = nil
+        cachedKey = nil
+        cachedItemKeys = nil
+        cacheLock.unlock()
+
         let defaults = UserDefaults.standard
         defaults.dictionaryRepresentation().keys
             .filter { $0.hasPrefix(baseKey) }
@@ -2940,7 +3131,7 @@ struct NuvioCollection: Decodable, Identifiable, Equatable {
 }
 
 /// Folder card aspect on Home — mirrors Android `PosterShape` / `tileShape`.
-enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
+enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable, Codable {
     case poster = "POSTER"
     case landscape = "LANDSCAPE"
     case square = "SQUARE"
@@ -2964,8 +3155,8 @@ enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    static func fromStored(_ value: String?) -> CollectionTileShape {
-        guard let value else { return .square }
+    static func fromStored(_ value: String?, fallback: CollectionTileShape = .poster) -> CollectionTileShape {
+        guard let value else { return fallback }
         switch value.uppercased() {
         case "POSTER": return .poster
         case "LANDSCAPE": return .landscape
@@ -2975,7 +3166,7 @@ enum CollectionTileShape: String, CaseIterable, Identifiable, Hashable {
             case "poster": return .poster
             case "landscape": return .landscape
             case "square": return .square
-            default: return .square
+            default: return fallback
             }
         }
     }
@@ -3037,7 +3228,7 @@ struct NuvioCollectionFolder: Decodable, Identifiable, Equatable {
             ?? c.decodeIfPresent(String.self, forKey: .presentation_style)
         let shapeRaw = try c.decodeIfPresent(String.self, forKey: .tileShape)
             ?? c.decodeIfPresent(String.self, forKey: .tile_shape)
-        tileShape = CollectionTileShape.fromStored(shapeRaw)
+        tileShape = CollectionTileShape.fromStored(shapeRaw, fallback: .square)
         sources = try c.decodeIfPresent([NuvioCollectionSource].self, forKey: .sources) ?? []
         catalogSources = try c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalogSources)
             ?? c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalog_sources)
@@ -3469,15 +3660,19 @@ enum CollectionsStore {
     /// (view modes, tile shapes, TMDB sources, …) survive the round-trip.
     static func rawCollections() -> [[String: Any]] {
         guard let data = readData(forKey: storageKey) else { return [] }
-        let rows = parseCollectionsArray(from: data) ?? []
+        guard let rows = parseCollectionsArray(from: data) else {
+            LargePayloadStore.remove(key: storageKey, directory: storageDirectoryName)
+            return []
+        }
         let streamingMigration = migrateStreamingServicesTemplate(in: rows)
         let studiosMigration = migrateStudiosFranchisesTemplate(in: streamingMigration.rows)
         let genresMigration = migrateDiscoverGenresTemplate(in: studiosMigration.rows)
-        if (streamingMigration.changed || studiosMigration.changed || genresMigration.changed),
-           let migratedData = try? JSONSerialization.data(withJSONObject: genresMigration.rows) {
+        let asianMigration = migrateAsianFilmAndSeriesTemplate(in: genresMigration.rows)
+        if (streamingMigration.changed || studiosMigration.changed || genresMigration.changed || asianMigration.changed),
+           let migratedData = try? JSONSerialization.data(withJSONObject: asianMigration.rows) {
             _ = writeData(migratedData, forKey: storageKey)
         }
-        return genresMigration.rows
+        return asianMigration.rows
     }
 
     /// Keeps previously added Streaming Services collections in sync with
@@ -3924,6 +4119,36 @@ enum CollectionsStore {
         }
     }
 
+    /// Keeps existing Asian Film & Series templates synchronized with template versioning.
+    private static func migrateAsianFilmAndSeriesTemplate(
+        in rows: [[String: Any]]
+    ) -> (rows: [[String: Any]], changed: Bool) {
+        var migrated = rows
+        var changed = false
+
+        for collectionIndex in migrated.indices {
+            var collection = migrated[collectionIndex]
+            let version = (collection["templateVersion"] as? NSNumber)?.intValue
+                ?? (collection["templateVersion"] as? Int)
+                ?? 0
+            let templateID = (collection["templateID"] as? String)?.lowercased()
+            let title = collection["title"] as? String
+            let isAsianTemplate = templateID == "asian-film-series"
+                || title?.caseInsensitiveCompare("Asian Film & Series") == .orderedSame
+                || title?.caseInsensitiveCompare("Asian Film and Series") == .orderedSame
+            guard isAsianTemplate,
+                  version < 1,
+                  let folders = collection["folders"] as? [[String: Any]] else { continue }
+
+            collection["templateID"] = "asian-film-series"
+            collection["templateVersion"] = 1
+            collection["folders"] = folders
+            migrated[collectionIndex] = collection
+            changed = true
+        }
+        return (migrated, changed)
+    }
+
     /// Accepts a JSON array, or a JSON string that itself encodes an array
     /// (double-encoded blobs some backends have returned).
     private static func parseCollectionsArray(from data: Data) -> [[String: Any]]? {
@@ -4100,6 +4325,10 @@ enum LargePayloadStore {
         urls(key: key, directory: directory)
             .compactMap { url -> (Data, Date)? in
                 guard let data = try? Data(contentsOf: url) else { return nil }
+                if data.isEmpty {
+                    try? FileManager.default.removeItem(at: url)
+                    return nil
+                }
                 let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                     .contentModificationDate ?? .distantPast
                 return (data, modifiedAt)
@@ -4139,6 +4368,56 @@ enum LargePayloadStore {
         for base in [applicationSupportBase, cachesBase] {
             guard let url = base?.appendingPathComponent(directory, isDirectory: true) else { continue }
             try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// Purges legacy oversized preferences from standard and all known profile suites
+    /// at launch before SwiftUI view bindings run.
+    static func purgeAllKnownPreferences() {
+        purgeLegacyOversizedPreferences(in: .standard)
+        let profileIds = ["guest", "default", "1", "2", "3", "4", "5", "6"]
+        for id in profileIds {
+            if let suite = UserDefaults(suiteName: "nuvio.tv.profile.settings.\(id)") {
+                purgeLegacyOversizedPreferences(in: suite)
+            }
+        }
+    }
+
+    /// Purges legacy oversized blobs and unbounded preference keys from UserDefaults
+    /// to keep domains well under tvOS preferences IPC size limits and prevent
+    /// __CFPREFERENCES_HAS_DETECTED_THIS_APP_TRYING_TO_STORE_TOO_MUCH_DATA__ aborts.
+    static func purgeLegacyOversizedPreferences(in store: UserDefaults = .standard) {
+        let legacyKeys = [
+            "nuvio.tv.settings.layout.homeCatalogTitles",
+            "nuvio.tv.settings.integrations.jellyfinLibraryIndex",
+            "nuvio.tv.settings.integrations.smbLibraryIndex",
+            "nuvio.tv.remoteProgress.localCheckpoints.v1",
+            "nuvio.tv.avatarCatalog.v1",
+            "nuvio.watched.v1",
+            "nuvio.library.v1",
+            "nuvio.episodeResume.v1",
+            "nuvio.continueWatching.v1",
+            "nuvio.simkl.all",
+            "nuvio.simkl.history",
+            "nuvio.simkl.activities",
+            "nuvio.simkl.playbacks"
+        ]
+        for key in legacyKeys {
+            store.removeObject(forKey: key)
+        }
+        let legacyPrefixes = [
+            "nuvio.tv.bingeGroup.",
+            "nuvio.tv.lastStreamQuality.",
+            "nuvio.tv.lastPlaybackStream.",
+            "nuvio.watched.v1.",
+            "nuvio.library.v1.",
+            "nuvio.episodeResume.v1."
+        ]
+        let dict = store.dictionaryRepresentation()
+        for key in dict.keys {
+            if legacyPrefixes.contains(where: { key.hasPrefix($0) }) {
+                store.removeObject(forKey: key)
+            }
         }
     }
 
@@ -4201,9 +4480,16 @@ struct WatchedSnapshot {
     /// Episode keys grouped by normalized series title and year
     let episodeKeysBySeriesTitle: [String: [(year: Int?, keys: Set<String>)]]
 
-    init(items: [WatchedStoreItem], source: TraktWatchProgressSource) {
+    init(
+        items: [WatchedStoreItem],
+        source: TraktWatchProgressSource,
+        additionalVisibleSources: Set<TraktWatchProgressSource> = []
+    ) {
         self.source = source
-        let visible = items.filter { $0.isVisible(under: source) }
+        let visible = items.filter { item in
+            item.isVisible(under: source)
+                || additionalVisibleSources.contains { item.isVisible(under: $0) }
+        }
         self.visibleItems = visible
 
         var wholeTitleKeysByType: [String: Set<String>] = [:]
@@ -4356,6 +4642,36 @@ struct WatchedSnapshot {
         }
         return result
     }
+
+    /// O(1) in-memory check to quickly determine whether any episodes of a series have watch history.
+    func hasWatchedAnyEpisodes(for meta: NuvioMeta) -> Bool {
+        let type = WatchedStore.normalizedType(meta.canonicalType)
+        let contentKeys = WatchedStore.contentIdentityKeys(for: meta)
+        for key in contentKeys {
+            if let matched = episodeKeysByIdentityKey["\(type)|\(key)"], !matched.isEmpty {
+                return true
+            }
+        }
+        let lowerId = meta.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let matched = episodeKeysByMetaId[lowerId], !matched.isEmpty {
+            return true
+        }
+        guard type == "series" else { return false }
+        let normTitle = WatchedStore.normalizedCatalogTitle(meta.name)
+        guard !normTitle.isEmpty, let seriesEntries = episodeKeysBySeriesTitle[normTitle] else {
+            return false
+        }
+        for entry in seriesEntries {
+            if let targetYear = meta.year, let entryYear = entry.year {
+                if targetYear == entryYear && !entry.keys.isEmpty {
+                    return true
+                }
+            } else if !entry.keys.isEmpty {
+                return true
+            }
+        }
+        return false
+    }
 }
 
 enum WatchedStore {
@@ -4375,6 +4691,7 @@ enum WatchedStore {
     private static var cachedData: Data?
     private static var cachedSnapshot: WatchedSnapshot?
     private static var cachedSource: TraktWatchProgressSource?
+    private static var cachedTraktHistoryVisibility = false
     private static var cacheGeneration = 0
 
     private enum PersistenceError: LocalizedError {
@@ -4419,6 +4736,7 @@ enum WatchedStore {
         cachedData = nil
         cachedSnapshot = nil
         cachedSource = nil
+        cachedTraktHistoryVisibility = false
     }
 
     /// Pre-warms the in-memory cache in the background off the main actor.
@@ -4563,17 +4881,25 @@ enum WatchedStore {
 
         let key = storageKey
         let currentSource = TraktSettingsStore.watchProgressSource(in: ProfileSettings.current)
+        let shouldShowConnectedTraktHistory = currentSource != .trakt
+            && RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: ProfileSettings.current)
 
         if cachedKey == key,
            let snapshot = cachedSnapshot,
-           cachedSource == currentSource {
+           cachedSource == currentSource,
+           cachedTraktHistoryVisibility == shouldShowConnectedTraktHistory {
             return snapshot
         }
 
         let allItems = itemsLocked()
-        let snapshot = WatchedSnapshot(items: allItems, source: currentSource)
+        let snapshot = WatchedSnapshot(
+            items: allItems,
+            source: currentSource,
+            additionalVisibleSources: shouldShowConnectedTraktHistory ? [.trakt] : []
+        )
         cachedSnapshot = snapshot
         cachedSource = currentSource
+        cachedTraktHistoryVisibility = shouldShowConnectedTraktHistory
         return snapshot
     }
 
@@ -4584,9 +4910,10 @@ enum WatchedStore {
         currentSnapshot().contains(metaId: metaId, type: type)
     }
 
-    /// Rows the selected backend actually has — which is what every "is this
-    /// watched?" question in the UI means. ``items()`` stays the full local
-    /// union, because sync pushes and history transfers work from that.
+    /// Rows the selected backend has, plus connected Trakt history. Trakt is an
+    /// account-level watched-history mirror and remains visible even when a
+    /// different provider owns Continue Watching. ``items()`` stays the full
+    /// local union, because sync pushes and history transfers work from that.
     static func visibleItems() -> [WatchedStoreItem] {
         currentSnapshot().visibleItems
     }
@@ -4604,6 +4931,13 @@ enum WatchedStore {
 
     static func contains(meta: NuvioMeta) -> Bool {
         currentSnapshot().contains(meta: meta)
+    }
+
+    /// Watched state for the Details title action. A fully watched series may
+    /// have only episode rows after a Trakt pull, so the aggregate episode
+    /// policy must be considered alongside an explicit title marker.
+    static func isWatchedForDisplay(meta: NuvioMeta) -> Bool {
+        contains(meta: meta) || (meta.isSeries && hasSeriesWatchedState(meta))
     }
 
     /// Catalog cards can use a provider-local id while the watched marker was
@@ -4637,6 +4971,11 @@ enum WatchedStore {
     /// normalized title match when the years do not conflict.
     static func catalogWatchedEpisodeKeys(meta: NuvioMeta) -> Set<String> {
         currentSnapshot().catalogWatchedEpisodeKeys(meta: meta)
+    }
+
+    /// Fast O(1) in-memory check to quickly determine whether any episodes of a series have watch history.
+    static func hasWatchedAnyEpisodes(for meta: NuvioMeta) -> Bool {
+        currentSnapshot().hasWatchedAnyEpisodes(for: meta)
     }
 
     /// Toggles whole-title watched state and returns the **actual** persisted
@@ -4786,7 +5125,7 @@ enum WatchedStore {
         for season in episodesBySeason.keys.sorted() {
             let episodes = (episodesBySeason[season] ?? []).sorted()
             guard !episodes.isEmpty else { continue }
-            if RemoteTrackingState.shouldSyncWatchedHistory(to: .trakt, in: store) {
+            if RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: store) {
                 for episode in episodes {
                     _ = enqueuePendingTraktMutation(
                         meta: meta,
@@ -4814,6 +5153,18 @@ enum WatchedStore {
                         episodes: episodes,
                         isWatched: isWatched,
                         store: store
+                    )
+                }
+            }
+            if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: store) {
+                Task { @MainActor in
+                    _ = await MdbListProgressService.setWatched(
+                        meta,
+                        season: season,
+                        episodes: episodes,
+                        isWatched: isWatched,
+                        store: store,
+                        profileScope: profileId
                     )
                 }
             }
@@ -4883,7 +5234,7 @@ enum WatchedStore {
         }
 
         let traktStore = ProfileSettings.current
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .trakt, in: traktStore) {
+        if RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: traktStore) {
             let profileId = activeProfileId
             // The pending ledger stays per episode — it is what confirms and
             // retries each row individually on the next pull.
@@ -4914,6 +5265,18 @@ enum WatchedStore {
                     episodes: episodeNumbers.sorted(),
                     isWatched: isWatched,
                     store: traktStore
+                )
+            }
+        }
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+            Task { @MainActor in
+                _ = await MdbListProgressService.setWatched(
+                    meta,
+                    season: season,
+                    episodes: episodeNumbers.sorted(),
+                    isWatched: isWatched,
+                    store: traktStore,
+                    profileScope: activeProfileId
                 )
             }
         }
@@ -4964,8 +5327,8 @@ enum WatchedStore {
 
     @discardableResult
     static func markWatched(_ meta: NuvioMeta, season: Int? = nil, episode: Int? = nil) -> Bool {
-        // A new mark belongs to whichever backend is selected — that is the one
-        // it gets pushed to, and the only one that will confirm it on a pull.
+        // A new mark is attributed to the selected backend immediately. Trakt
+        // is also mirrored when connected, even if another backend owns resume.
         let item = WatchedStoreItem(
             meta: meta.persistenceSnapshot,
             watchedAt: Date(),
@@ -5000,7 +5363,7 @@ enum WatchedStore {
             )
         }
         let traktStore = ProfileSettings.current
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .trakt, in: traktStore) {
+        if RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: traktStore) {
             let profileId = activeProfileId
             _ = enqueuePendingTraktMutation(
                 meta: meta,
@@ -5027,6 +5390,18 @@ enum WatchedStore {
                     episode: episode,
                     isWatched: true,
                     store: traktStore
+                )
+            }
+        }
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+            Task { @MainActor in
+                _ = await MdbListProgressService.setWatched(
+                    meta,
+                    season: season,
+                    episode: episode,
+                    isWatched: true,
+                    store: traktStore,
+                    profileScope: activeProfileId
                 )
             }
         }
@@ -5091,7 +5466,7 @@ enum WatchedStore {
         episode: Int?
     ) {
         let traktStore = ProfileSettings.current
-        if RemoteTrackingState.shouldSyncWatchedHistory(to: .trakt, in: traktStore) {
+        if RemoteTrackingState.shouldMirrorWatchedHistoryToTrakt(in: traktStore) {
             let profileId = activeProfileId
             _ = enqueuePendingTraktMutation(
                 meta: meta,
@@ -5118,6 +5493,18 @@ enum WatchedStore {
                     episode: episode,
                     isWatched: false,
                     store: traktStore
+                )
+            }
+        }
+        if RemoteTrackingState.shouldSyncWatchedHistory(to: .mdblist, in: traktStore) {
+            Task { @MainActor in
+                _ = await MdbListProgressService.setWatched(
+                    meta,
+                    season: season,
+                    episode: episode,
+                    isWatched: false,
+                    store: traktStore,
+                    profileScope: activeProfileId
                 )
             }
         }
@@ -5236,6 +5623,42 @@ enum WatchedStore {
             guard !item.sources.isEmpty else { return nil }
             var retained = item
             retained.sources.remove(TraktWatchProgressSource.simkl.rawValue)
+            return retained.sources.isEmpty ? nil : retained
+        }
+        let changed = updated.count != current.count || zip(updated, current).contains {
+            $0.id != $1.id || $0.sources != $1.sources
+        }
+        return !changed || persist(updated)
+    }
+
+    /// Applies MDBList's complete watched snapshot while removing only rows
+    /// previously attributed to MDBList. Local, Trakt, and Simkl ownership is
+    /// preserved when the same title is known by more than one source.
+    @discardableResult
+    static func reconcileMdbListSnapshot(
+        _ remoteItems: [WatchedStoreItem],
+        previousRemoteItems: [WatchedStoreItem],
+        syncStartedAt: Date
+    ) -> Bool {
+        let source = TraktWatchProgressSource.mdblist.rawValue
+        let remoteItems = remoteItems.map { $0.adding(source: .mdblist) }
+        guard mergeRemote(remoteItems, confirmsTombstoneDeletions: false) else { return false }
+
+        let currentRemoteKeys = Set(remoteItems.flatMap(watchedIdentityKeys))
+        let removedRemoteKeys = Set(previousRemoteItems.flatMap(watchedIdentityKeys))
+            .subtracting(currentRemoteKeys)
+        guard !removedRemoteKeys.isEmpty else { return true }
+
+        let current = items()
+        let updated = current.compactMap { item -> WatchedStoreItem? in
+            guard item.watchedAt <= syncStartedAt,
+                  !watchedIdentityKeys(item).isDisjoint(with: removedRemoteKeys),
+                  item.sources.isEmpty || item.sources.contains(source) else {
+                return item
+            }
+            guard !item.sources.isEmpty else { return nil }
+            var retained = item
+            retained.sources.remove(source)
             return retained.sources.isEmpty ? nil : retained
         }
         let changed = updated.count != current.count || zip(updated, current).contains {
@@ -5505,9 +5928,7 @@ enum WatchedStore {
         profileId: String?
     ) -> Bool {
         guard let data = try? makeEncoder().encode(entries) else { return false }
-        return writeData(data, forKey: pendingTraktStorageKey(for: profileId), verify: { payload in
-            _ = try makeDecoder().decode([PendingTraktMutation].self, from: payload)
-        })
+        return writeData(data, forKey: pendingTraktStorageKey(for: profileId))
     }
 
     static func clearPendingTraktMutations(profileId: String?) {
@@ -5601,9 +6022,7 @@ enum WatchedStore {
     @discardableResult
     private static func persistTombstones(_ entries: [Tombstone]) -> Bool {
         guard let data = try? JSONEncoder().encode(entries) else { return false }
-        return writeData(data, forKey: tombstoneStorageKey, verify: { payload in
-            _ = try makeDecoder().decode([Tombstone].self, from: payload)
-        })
+        return writeData(data, forKey: tombstoneStorageKey)
     }
 
     static func replaceAll(_ newItems: [WatchedStoreItem]) {
@@ -5638,9 +6057,7 @@ enum WatchedStore {
             return true
         }
 
-        let saved = writeData(data, forKey: key, verify: { payload in
-            _ = try makeDecoder().decode([WatchedStoreItem].self, from: payload)
-        })
+        let saved = writeData(data, forKey: key)
         guard saved else {
             cacheLock.unlock()
             return false
@@ -5771,15 +6188,23 @@ enum WatchedStore {
         var candidates: [StoredFile] = []
         if let url = storageURL(forKey: key),
            let data = try? Data(contentsOf: url) {
-            let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            candidates.append(StoredFile(data: data, url: url, modifiedAt: modifiedAt, isFallback: false))
+            if data.isEmpty {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                candidates.append(StoredFile(data: data, url: url, modifiedAt: modifiedAt, isFallback: false))
+            }
         }
         if let url = fallbackStorageURL(forKey: key),
            let data = try? Data(contentsOf: url) {
-            let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            candidates.append(StoredFile(data: data, url: url, modifiedAt: modifiedAt, isFallback: true))
+            if data.isEmpty {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                let modifiedAt = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate ?? .distantPast
+                candidates.append(StoredFile(data: data, url: url, modifiedAt: modifiedAt, isFallback: true))
+            }
         }
         return candidates.max { lhs, rhs in
             if lhs.modifiedAt == rhs.modifiedAt {
@@ -5953,7 +6378,31 @@ enum WatchedStore {
 enum ProfileSettings {
     private static let suitePrefix = "nuvio.tv.profile.settings"
     private static let seededFlag = "nuvio.tv.profile.settings.seeded"
+    private static let profileScopeKey = "nuvio.tv.profile.settings.profileID"
+    private static let primaryProfileKey = "nuvio.tv.profile.settings.isPrimary"
+    private static let traktIsolationMigrationKey = "nuvio.tv.profile.settings.traktIsolation.v1"
+    private static let simklIsolationMigrationKey = "nuvio.tv.profile.settings.simklIsolation.v1"
+    private static let mdbListIsolationMigrationKey = "nuvio.tv.profile.settings.mdbListIsolation.v1"
     static let settingsChangedNotification = Notification.Name("nuvio.tv.profile.settings.changed")
+
+    /// Values identifying connected external tracking/metadata accounts on the device.
+    /// They are deliberately not copied when a new profile is created: a profile
+    /// must connect its own accounts explicitly.
+    private static let profileLocalIntegrationKeys: Set<String> = [
+        // Trakt
+        SettingsKey.traktConnected,
+        SettingsKey.traktClientID,
+        SettingsKey.traktClientSecret,
+        // Simkl
+        SettingsKey.simklClientID,
+        SettingsKey.simklAccessToken,
+        SettingsKey.simklPlanToWatchHomeCatalogs,
+        // MDBList
+        SettingsKey.mdbListApiKey,
+        SettingsKey.mdbListEnabled
+    ]
+
+    private static var profileLocalTraktKeys: Set<String> { profileLocalIntegrationKeys }
 
     static func notifySettingsChanged() {
         if Thread.isMainThread {
@@ -5978,6 +6427,10 @@ enum ProfileSettings {
     /// The suite backing a given profile id, or `.standard` when there is none.
     /// `UserDefaults(suiteName:)` returns the same shared store for a name, so
     /// repeated calls for one profile all read and write the same values.
+    ///
+    /// This accessor must stay read-only. On upgrade, a profile suite may still
+    /// contain a legacy oversized preference blob; writing the identity marker
+    /// here would reach cfprefsd before `setActiveProfile` has purged it.
     static func store(for profileId: String?) -> UserDefaults {
         guard let id = profileId, !id.isEmpty,
               let suite = UserDefaults(suiteName: "\(suitePrefix).\(id)") else {
@@ -5989,13 +6442,24 @@ enum ProfileSettings {
     /// Point reads/writes at a profile. Called on launch and on every switch.
     /// Seeds the profile from the pre-profile global settings the first time it
     /// is used so existing installs keep their preferences.
-    static func setActiveProfile(_ profileId: String?) {
+    static func setActiveProfile(_ profileId: String?, isPrimary: Bool? = nil) {
         guard let id = profileId, !id.isEmpty else { return }
         let suite = store(for: id)
+        LargePayloadStore.purgeLegacyOversizedPreferences(in: suite)
+        LargePayloadStore.purgeLegacyOversizedPreferences(in: .standard)
+        // Mark only after cleanup. See the read-only `store(for:)` accessor.
+        if suite.string(forKey: profileScopeKey) != id {
+            suite.set(id, forKey: profileScopeKey)
+        }
+        let primary = isPrimary ?? (id == "1")
         let needsSeed = !suite.bool(forKey: seededFlag)
-        seedFromGlobalIfNeeded(suite)
+        seedFromGlobalIfNeeded(suite, isPrimary: primary)
         current = suite
         activeProfileID = id
+        suite.set(primary, forKey: primaryProfileKey)
+        migrateTraktIsolationIfNeeded(in: suite, isPrimary: primary)
+        migrateSimklIsolationIfNeeded(in: suite, profileScope: id, isPrimary: primary)
+        migrateMdbListIsolationIfNeeded(in: suite, profileScope: id, isPrimary: primary)
         AISubtitleKeyStore.migrateLegacyKey(from: suite, profileScope: id)
         if needsSeed {
             AISubtitleKeyStore.migrateLegacyKey(from: .standard, profileScope: id)
@@ -6011,6 +6475,31 @@ enum ProfileSettings {
         activeProfileID = nil
     }
 
+    /// Returns whether a captured settings store still belongs to the active
+    /// profile. Provider requests use this before and after suspension points
+    /// so a late completion cannot write through the previous profile's link.
+    static func isActiveStore(_ store: UserDefaults) -> Bool {
+        if let scope = store.string(forKey: profileScopeKey) {
+            guard let activeID = activeProfileID else { return false }
+            return scope == activeID
+        }
+        if NSClassFromString("XCTestCase") != nil {
+            return true
+        }
+        guard let activeID = activeProfileID else { return true }
+        return store === current || store === UserDefaults.standard
+    }
+
+    /// Whether this store represents the account's primary profile. This is
+    /// used only to migrate legacy auth state; secondary profiles may still
+    /// connect their own Trakt account explicitly.
+    static func isPrimaryProfileStore(_ store: UserDefaults) -> Bool {
+        if let value = store.object(forKey: primaryProfileKey) as? Bool {
+            return value
+        }
+        return store.string(forKey: profileScopeKey) == "1"
+    }
+
     /// Deletes the given profiles' settings suites and the pre-profile copies
     /// in `.standard`, so sign-out leaves no add-ons, API keys, or preferences
     /// behind. Points `current` back at `.standard` first so nothing keeps
@@ -6019,22 +6508,37 @@ enum ProfileSettings {
         current = .standard
         activeProfileID = nil
         let simklTokenStorage = SimklKeychainTokenStorage()
+        let mdbListTokenStorage = MdbListKeychainTokenStorage()
         for id in Set(profileIds) where !id.isEmpty {
             simklTokenStorage.setAccessToken(nil, for: id)
+            MdbListAuthStore.clearAuth(
+                profileScope: id,
+                store: store(for: id),
+                tokenStorage: mdbListTokenStorage
+            )
             AISubtitleKeyStore.remove(profileScope: id)
             Task { await AISubtitleTranslationCache.shared.removeAll(profileScope: id) }
+            StreamBadgeSettingsStore.removeRules(for: id)
             UserDefaults.standard.removePersistentDomain(forName: "\(suitePrefix).\(id)")
         }
         AISubtitleKeyStore.remove(profileScope: "default")
         Task { await AISubtitleTranslationCache.shared.removeAll(profileScope: "default") }
+        StreamBadgeSettingsStore.removeRules(for: "default")
         SimklAuthStore.clearAuth(
             profileScope: "default",
             store: .standard,
             tokenStorage: simklTokenStorage
         )
+        MdbListAuthStore.clearAuth(
+            profileScope: "default",
+            store: .standard,
+            tokenStorage: mdbListTokenStorage
+        )
+        mdbListTokenStorage.removeAll()
         // Removing the suites no longer takes the sync caches with them — they
         // are files now, and would otherwise be inherited by the next account.
         SimklSyncCache.eraseAll()
+        LargePayloadStore.purgeLegacyOversizedPreferences(in: .standard)
         for key in SettingsKey.all {
             UserDefaults.standard.removeObject(forKey: key)
         }
@@ -6044,29 +6548,123 @@ enum ProfileSettings {
     /// mark it seeded so the global migration never overwrites the copy.
     static func seedNewProfile(_ profileId: String, copyingFrom source: UserDefaults? = nil) {
         let destination = store(for: profileId)
-        copySettings(from: source ?? current, to: destination)
+        copySettings(from: source ?? current, to: destination, includeProfileLocalIntegrationSettings: false)
+        clearTraktProfileState(in: destination)
+        clearSimklProfileState(in: destination, profileScope: profileId)
+        clearMdbListProfileState(in: destination, profileScope: profileId)
         // Secrets never cross profile boundaries. Keep AI translation disabled
         // until this profile explicitly supplies its own Keychain credential.
         destination.set(false, forKey: SettingsKey.aiSubtitlesEnabled)
         destination.removeObject(forKey: SettingsKey.aiSubtitlesGeminiAPIKey)
         destination.set(true, forKey: seededFlag)
+        destination.set(false, forKey: primaryProfileKey)
+        destination.set(true, forKey: traktIsolationMigrationKey)
+        destination.set(true, forKey: simklIsolationMigrationKey)
+        destination.set(true, forKey: mdbListIsolationMigrationKey)
     }
 
-    private static func seedFromGlobalIfNeeded(_ suite: UserDefaults) {
+    private static func seedFromGlobalIfNeeded(_ suite: UserDefaults, isPrimary: Bool) {
         guard !suite.bool(forKey: seededFlag) else { return }
-        copySettings(from: .standard, to: suite)
+        copySettings(
+            from: .standard,
+            to: suite,
+            includeProfileLocalIntegrationSettings: isPrimary
+        )
         suite.set(true, forKey: seededFlag)
     }
 
-    private static func copySettings(from source: UserDefaults, to destination: UserDefaults) {
+    private static func copySettings(
+        from source: UserDefaults,
+        to destination: UserDefaults,
+        includeProfileLocalIntegrationSettings: Bool = false
+    ) {
         guard source != destination else { return }
-        for key in SettingsKey.all where key != SettingsKey.aiSubtitlesGeminiAPIKey {
+        for key in SettingsKey.all
+            where key != SettingsKey.aiSubtitlesGeminiAPIKey
+                && (includeProfileLocalIntegrationSettings || !profileLocalIntegrationKeys.contains(key)) {
             if let value = source.object(forKey: key) {
                 destination.set(value, forKey: key)
             } else {
                 destination.removeObject(forKey: key)
             }
         }
+    }
+
+    /// One-time cleanup for profiles created before Trakt credentials and the
+    /// connection marker were treated as profile-local. A primary profile keeps
+    /// its legacy login; a secondary profile must explicitly reconnect.
+    private static func migrateTraktIsolationIfNeeded(
+        in store: UserDefaults,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: traktIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearTraktProfileState(in: store)
+        }
+        store.set(true, forKey: traktIsolationMigrationKey)
+    }
+
+    private static func clearTraktProfileState(in store: UserDefaults) {
+        [
+            SettingsKey.traktConnected,
+            SettingsKey.traktClientID,
+            SettingsKey.traktClientSecret
+        ].forEach { store.removeObject(forKey: $0) }
+        store.removeObject(forKey: SettingsKey.traktWatchProgressSource)
+        store.removeObject(forKey: SettingsKey.watchProgressSourceChosenByUser)
+        store.removeObject(forKey: SettingsKey.traktLibrarySourceMode)
+        store.removeObject(forKey: SettingsKey.traktMoreLikeThisSource)
+        TraktAuthStore.clearAuth(store: store)
+    }
+
+    private static func migrateSimklIsolationIfNeeded(
+        in store: UserDefaults,
+        profileScope: String,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: simklIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearSimklProfileState(in: store, profileScope: profileScope)
+        }
+        store.set(true, forKey: simklIsolationMigrationKey)
+    }
+
+    private static func clearSimklProfileState(in store: UserDefaults, profileScope: String) {
+        store.removeObject(forKey: SettingsKey.simklAccessToken)
+        store.removeObject(forKey: SettingsKey.simklClientID)
+        store.removeObject(forKey: SettingsKey.simklPlanToWatchHomeCatalogs)
+        SimklAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: SimklKeychainTokenStorage()
+        )
+        RemoteTrackingState.normalizeWatchProgressSource(in: store)
+        RemoteTrackingState.normalizeLibrarySource(in: store)
+        RemoteTrackingState.normalizeMoreLikeThisSource(in: store)
+    }
+
+    private static func migrateMdbListIsolationIfNeeded(
+        in store: UserDefaults,
+        profileScope: String,
+        isPrimary: Bool
+    ) {
+        guard !store.bool(forKey: mdbListIsolationMigrationKey) else { return }
+        if !isPrimary {
+            clearMdbListProfileState(in: store, profileScope: profileScope)
+        }
+        store.set(true, forKey: mdbListIsolationMigrationKey)
+    }
+
+    private static func clearMdbListProfileState(in store: UserDefaults, profileScope: String) {
+        store.removeObject(forKey: SettingsKey.mdbListApiKey)
+        store.removeObject(forKey: SettingsKey.mdbListEnabled)
+        MdbListAuthStore.clearAuth(
+            profileScope: profileScope,
+            store: store,
+            tokenStorage: MdbListKeychainTokenStorage()
+        )
+        RemoteTrackingState.normalizeWatchProgressSource(in: store)
+        RemoteTrackingState.normalizeLibrarySource(in: store)
     }
 }
 
@@ -6197,6 +6795,8 @@ struct DetailsUiState {
     var people: [TmdbPersonMetadata] = []
     /// Simkl community rating, catalog rank, and drop rate.
     var simklRatings: SimklTitleRatings? = nil
+    /// The authenticated user's optional MDBList rating for this title.
+    var mdbListUserRating: Int? = nil
     /// Top liked Trakt comments (max 5).
     var comments: [TraktCommentReview] = []
     var isLoadingEnrichment: Bool = false

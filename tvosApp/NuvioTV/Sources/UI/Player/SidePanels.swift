@@ -260,6 +260,8 @@ struct PlayerEpisodesPanel: View {
 struct PlayerSourcesPanel: View {
     @ObservedObject var viewModel: PlayerViewModel
     @FocusState private var focusedID: String?
+    @State private var visibleSourceLimit: Int = 20
+    @State private var didSeedSourceFocus = false
 
     private var targetSourceId: String? {
         if let current = viewModel.availableSources.first(where: { viewModel.isCurrentSource($0) }) {
@@ -268,12 +270,34 @@ struct PlayerSourcesPanel: View {
         return viewModel.availableSources.first?.id
     }
 
+    private var sourcesToShow: [NuvioStream] {
+        Array(viewModel.availableSources.prefix(visibleSourceLimit))
+    }
+
+    private func loadMoreSources() {
+        guard visibleSourceLimit < viewModel.availableSources.count else { return }
+        visibleSourceLimit = min(visibleSourceLimit + 20, viewModel.availableSources.count)
+    }
+
+    private func ensureTargetSourceVisible() {
+        if let target = targetSourceId,
+           let index = viewModel.availableSources.firstIndex(where: { $0.id == target }) {
+            if index >= visibleSourceLimit {
+                visibleSourceLimit = max(visibleSourceLimit, index + 10)
+            }
+        }
+    }
+
     var body: some View {
+        let totalCount = viewModel.availableSources.count
+        let displayedCount = sourcesToShow.count
+        let hasMore = totalCount > displayedCount
+
         PlayerSidePanelChrome(title: "Sources", onExit: { viewModel.closeSidePanel() }) {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 12) {
-                        if viewModel.isLoadingSources {
+                        if viewModel.isLoadingSources && sourcesToShow.isEmpty {
                             HStack(spacing: 14) {
                                 ProgressView()
                                     .progressViewStyle(.circular)
@@ -297,7 +321,7 @@ struct PlayerSourcesPanel: View {
                             .focused($focusedID, equals: "empty")
                             .id("empty")
                         } else {
-                            ForEach(viewModel.availableSources, id: \.id) { stream in
+                            ForEach(sourcesToShow, id: \.id) { stream in
                                 let selected = viewModel.isCurrentSource(stream)
                                 Button {
                                     viewModel.selectSource(stream)
@@ -314,6 +338,40 @@ struct PlayerSourcesPanel: View {
                                 .focusEffectDisabledIfAvailable()
                                 .focused($focusedID, equals: stream.id)
                                 .id(stream.id)
+                                .onAppear {
+                                    if let index = sourcesToShow.firstIndex(where: { $0.id == stream.id }),
+                                       index >= sourcesToShow.count - 4,
+                                       hasMore {
+                                        loadMoreSources()
+                                    }
+                                }
+                            }
+
+                            if hasMore {
+                                HStack(spacing: 12) {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .tint(.white)
+                                    Text(L10n.format("details_showing_sources_format", fallback: "Showing %1$d of %2$d sources…", displayedCount, totalCount))
+                                        .font(.system(size: 20, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.6))
+                                }
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.vertical, 8)
+                                .onAppear {
+                                    loadMoreSources()
+                                }
+                            } else if viewModel.isLoadingSources {
+                                HStack(spacing: 14) {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .tint(.white)
+                                    Text(L10n.string("player_searching_sources", fallback: "Searching sources…"))
+                                        .font(.system(size: 22, weight: .medium))
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 12)
                             }
                         }
                     }
@@ -322,15 +380,24 @@ struct PlayerSourcesPanel: View {
                 }
                 .focusSection()
                 .onAppear {
+                    didSeedSourceFocus = false
                     viewModel.loadSourcesIfNeeded()
-                    scrollToTarget(proxy: proxy)
+                    seedSourceFocus(proxy: proxy)
                 }
                 .onChange(of: viewModel.availableSources.map(\.id)) { _, sourceIDs in
                     guard !sourceIDs.isEmpty else { return }
-                    scrollToTarget(proxy: proxy)
+                    seedSourceFocus(proxy: proxy)
                 }
             }
         }
+    }
+
+    private func seedSourceFocus(proxy: ScrollViewProxy) {
+        guard !didSeedSourceFocus else { return }
+        ensureTargetSourceVisible()
+        guard targetSourceId != nil else { return }
+        didSeedSourceFocus = true
+        scrollToTarget(proxy: proxy)
     }
 
     private func scrollToTarget(proxy: ScrollViewProxy) {

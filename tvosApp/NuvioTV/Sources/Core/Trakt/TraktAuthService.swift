@@ -46,12 +46,14 @@ enum TraktConnectionMode {
 enum TraktWatchProgressSource: String, CaseIterable, Codable {
     case trakt = "TRAKT"
     case simkl = "SIMKL"
+    case mdblist = "MDBLIST"
     case nuvioSync = "NUVIO_SYNC"
 
     var label: String {
         switch self {
         case .trakt: return "Trakt"
         case .simkl: return "Simkl"
+        case .mdblist: return "MDBList"
         case .nuvioSync: return "Nuvio Sync"
         }
     }
@@ -60,12 +62,14 @@ enum TraktWatchProgressSource: String, CaseIterable, Codable {
 enum TraktLibrarySourceMode: String, CaseIterable {
     case trakt = "TRAKT"
     case simkl = "SIMKL"
+    case mdblist = "MDBLIST"
     case local = "LOCAL"
 
     var label: String {
         switch self {
         case .trakt: return "Trakt"
         case .simkl: return "Simkl"
+        case .mdblist: return "MDBList"
         case .local: return "Nuvio Library"
         }
     }
@@ -171,6 +175,22 @@ enum TraktAuthStore {
         state(in: ProfileSettings.current)
     }
 
+    /// Authentication is valid only for the profile that explicitly linked
+    /// the account. The primary profile may use a legacy token created before
+    /// the profile link marker existed; secondary profiles must reconnect after
+    /// upgrading instead of inheriting that token.
+    static var isAuthenticated: Bool {
+        isAuthenticated(in: ProfileSettings.current)
+    }
+
+    static func isAuthenticated(in defaults: UserDefaults) -> Bool {
+        guard state(in: defaults).isAuthenticated(in: defaults) else { return false }
+        if (defaults.object(forKey: SettingsKey.traktConnected) as? Bool) == true {
+            return true
+        }
+        return ProfileSettings.isPrimaryProfileStore(defaults)
+    }
+
     static func state(in defaults: UserDefaults) -> TraktAuthState {
         return TraktAuthState(
             accessToken: defaults.string(forKey: Key.accessToken),
@@ -199,6 +219,7 @@ enum TraktAuthStore {
                 Key.accessToken, Key.refreshToken, Key.tokenType, Key.createdAt,
                 Key.expiresIn, Key.username, Key.userSlug, Key.cachedStats
             ].forEach { defaults.removeObject(forKey: $0) }
+            defaults.removeObject(forKey: SettingsKey.traktConnected)
         }
         defaults.set(response.deviceCode, forKey: Key.deviceCode)
         defaults.set(response.userCode, forKey: Key.userCode)
@@ -219,6 +240,7 @@ enum TraktAuthStore {
         defaults.set(response.createdAt, forKey: Key.createdAt)
         defaults.set(normalizeTokenLifetime(response.expiresIn), forKey: Key.expiresIn)
         defaults.set(clientID, forKey: Key.credentialClientID)
+        defaults.set(true, forKey: SettingsKey.traktConnected)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -267,7 +289,11 @@ enum TraktAuthStore {
             Key.username, Key.userSlug, Key.deviceCode, Key.userCode, Key.verificationURL,
             Key.expiresAt, Key.pollInterval, Key.credentialClientID, Key.cachedStats
         ].forEach { defaults.removeObject(forKey: $0) }
+        defaults.removeObject(forKey: SettingsKey.traktConnected)
         NotificationCenter.default.post(name: changedNotification, object: nil)
+        RemoteTrackingState.normalizeWatchProgressSource(in: defaults)
+        RemoteTrackingState.normalizeLibrarySource(in: defaults)
+        RemoteTrackingState.normalizeMoreLikeThisSource(in: defaults)
     }
 
     private static func intIfPresent(_ key: String, defaults: UserDefaults) -> Int? {
@@ -361,7 +387,7 @@ enum TraktSettingsStore {
     ) {
         guard defaults.string(forKey: SettingsKey.traktWatchProgressSource) == nil else { return }
         let resolved: TraktWatchProgressSource
-        if TraktAuthStore.state(in: defaults).isAuthenticated(in: defaults) {
+        if TraktAuthStore.isAuthenticated(in: defaults) {
             resolved = .trakt
         } else if SimklRuntimeSession.authenticatedState(
             store: defaults,
@@ -410,10 +436,14 @@ enum TraktSettingsStore {
 
     static var moreLikeThisSource: TraktMoreLikeThisSource {
         get {
-            let raw = ProfileSettings.current.string(forKey: SettingsKey.traktMoreLikeThisSource)
-            return TraktMoreLikeThisSource(rawValue: raw ?? "") ?? TraktDefaults.moreLikeThisSource
+            moreLikeThisSource(in: ProfileSettings.current)
         }
         set { ProfileSettings.current.set(newValue.rawValue, forKey: SettingsKey.traktMoreLikeThisSource) }
+    }
+
+    static func moreLikeThisSource(in defaults: UserDefaults) -> TraktMoreLikeThisSource {
+        let raw = defaults.string(forKey: SettingsKey.traktMoreLikeThisSource)
+        return TraktMoreLikeThisSource(rawValue: raw ?? "") ?? TraktDefaults.moreLikeThisSource
     }
 
     private static func bool(_ key: String, fallback: Bool) -> Bool {
@@ -433,14 +463,124 @@ enum RemoteTrackingState {
     }
 
     static func isProgressSourceAuthenticated(in store: UserDefaults) -> Bool {
-        switch TraktSettingsStore.watchProgressSource(in: store) {
+        let source = TraktSettingsStore.watchProgressSource(in: store)
+        return source != .nuvioSync && isProgressSourceAuthenticated(source, in: store)
+    }
+
+    static func isProgressSourceAuthenticated(
+        _ source: TraktWatchProgressSource,
+        in store: UserDefaults
+    ) -> Bool {
+        switch source {
         case .nuvioSync:
             return false
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
+        case .mdblist:
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
         }
+    }
+
+    static func availableProgressSources(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> [TraktWatchProgressSource] {
+        TraktWatchProgressSource.allCases.filter { source in
+            source == .nuvioSync || isProgressSourceAuthenticated(source, in: store)
+        }
+    }
+
+    static func normalizeWatchProgressSource(
+        in store: UserDefaults = ProfileSettings.current
+    ) {
+        let source = TraktSettingsStore.watchProgressSource(in: store)
+        guard source != .nuvioSync,
+              !isProgressSourceAuthenticated(source, in: store) else { return }
+        store.set(TraktWatchProgressSource.nuvioSync.rawValue, forKey: SettingsKey.traktWatchProgressSource)
+        NotificationCenter.default.post(
+            name: TraktSettingsStore.continueWatchingChangedNotification,
+            object: nil
+        )
+    }
+
+    static func isLibrarySourceAuthenticated(
+        _ source: TraktLibrarySourceMode,
+        in store: UserDefaults
+    ) -> Bool {
+        switch source {
+        case .local:
+            return true
+        case .trakt:
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
+        case .simkl:
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
+        case .mdblist:
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
+        }
+    }
+
+    static func availableLibrarySources(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> [TraktLibrarySourceMode] {
+        TraktLibrarySourceMode.allCases.filter {
+            isLibrarySourceAuthenticated($0, in: store)
+        }
+    }
+
+    static func normalizeLibrarySource(
+        in store: UserDefaults = ProfileSettings.current
+    ) {
+        let source = TraktSettingsStore.librarySourceMode(in: store)
+        guard !isLibrarySourceAuthenticated(source, in: store) else { return }
+        store.set(TraktLibrarySourceMode.local.rawValue, forKey: SettingsKey.traktLibrarySourceMode)
+        NotificationCenter.default.post(
+            name: TraktSettingsStore.libraryChangedNotification,
+            object: nil
+        )
+    }
+
+    static func isMoreLikeThisSourceAvailable(
+        _ source: TraktMoreLikeThisSource,
+        in store: UserDefaults = ProfileSettings.current
+    ) -> Bool {
+        switch source {
+        case .trakt:
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
+        case .simkl:
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
+        case .tmdb:
+            let apiKey = store.string(forKey: SettingsKey.tmdbApiKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let enabled = (store.object(forKey: SettingsKey.tmdbEnabled) as? Bool) ?? false
+            let useMoreLikeThis = (store.object(forKey: SettingsKey.tmdbUseMoreLikeThis) as? Bool) ?? true
+            return enabled && !apiKey.isEmpty && useMoreLikeThis
+        }
+    }
+
+    static func availableMoreLikeThisSources(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> [TraktMoreLikeThisSource] {
+        TraktMoreLikeThisSource.allCases.filter {
+            isMoreLikeThisSourceAvailable($0, in: store)
+        }
+    }
+
+    static func normalizeMoreLikeThisSource(
+        in store: UserDefaults = ProfileSettings.current
+    ) {
+        let source = TraktSettingsStore.moreLikeThisSource(in: store)
+        guard !isMoreLikeThisSourceAvailable(source, in: store) else { return }
+        let fallback = availableMoreLikeThisSources(in: store).first ?? .tmdb
+        store.set(fallback.rawValue, forKey: SettingsKey.traktMoreLikeThisSource)
     }
 
     static func routesWatchedHistory(
@@ -462,10 +602,25 @@ enum RemoteTrackingState {
         case .nuvioSync:
             return false
         case .trakt:
-            return TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return ProfileSettings.isActiveStore(store)
+                && TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
-            return SimklRuntimeSession.authenticatedState(store: store) != nil
+            return ProfileSettings.isActiveStore(store)
+                && SimklRuntimeSession.authenticatedState(store: store) != nil
+        case .mdblist:
+            return ProfileSettings.isActiveStore(store)
+                && MdbListRuntimeSession.isAuthenticated(in: store)
         }
+    }
+
+    /// Trakt watched history is an account-level mirror, not the resume source.
+    /// A user may keep Continue Watching in Nuvio Sync while still expecting
+    /// local watched actions to reach their connected Trakt account.
+    static func shouldMirrorWatchedHistoryToTrakt(
+        in store: UserDefaults = ProfileSettings.current
+    ) -> Bool {
+        ProfileSettings.isActiveStore(store)
+            && TraktAuthStore.isAuthenticated(in: store)
     }
 }
 
@@ -676,9 +831,9 @@ final class TraktAuthService {
     }
 
     func refreshTokenIfNeeded(force: Bool = false) async -> Bool {
-        guard hasRequiredCredentials() else { return false }
+        guard ProfileSettings.isActiveStore(store), hasRequiredCredentials() else { return false }
         let state = currentState()
-        guard state.isAuthenticated(in: store), let refreshToken = state.refreshToken else { return false }
+        guard TraktAuthStore.isAuthenticated(in: store), let refreshToken = state.refreshToken else { return false }
         if !force && !isTokenExpiredOrExpiring(state) { return true }
 
         do {
@@ -707,7 +862,7 @@ final class TraktAuthService {
 
     func revokeAndLogout() async {
         let state = currentState()
-        if hasRequiredCredentials(), state.isAuthenticated(in: store), let accessToken = state.accessToken {
+        if hasRequiredCredentials(), TraktAuthStore.isAuthenticated(in: store), let accessToken = state.accessToken {
             try? await postEmpty(
                 path: "oauth/revoke",
                 body: TraktRevokeRequest(
@@ -746,14 +901,20 @@ final class TraktAuthService {
     }
 
     fileprivate func authorizedGet<T: Decodable>(path: String) async throws -> T {
+        let result: HTTPResult<T> = try await authorizedGetResult(path: path)
+        return try result.valueOrThrow()
+    }
+
+    /// Authenticated GET variant used by paginated endpoints that need the
+    /// response headers as well as the decoded value.
+    fileprivate func authorizedGetResult<T: Decodable>(path: String) async throws -> HTTPResult<T> {
         guard await refreshTokenIfNeeded(), let token = currentState().accessToken else {
             throw TraktServiceError.message("Not authenticated with Trakt.")
         }
         var request = baseRequest(path: path)
         request.httpMethod = "GET"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let result: HTTPResult<T> = try await perform(request)
-        return try result.valueOrThrow()
+        return try await perform(request)
     }
 
     /// Authenticated writes such as scrobbles may legitimately return an empty
@@ -810,6 +971,10 @@ final class TraktAuthService {
         guard let http = response as? HTTPURLResponse else {
             throw TraktServiceError.message("Invalid Trakt response.")
         }
+        let headers = http.allHeaderFields.reduce(into: [String: String]()) { result, field in
+            guard let name = field.key as? String else { return }
+            result[name.lowercased()] = String(describing: field.value)
+        }
         let rawError = Self.errorMessage(from: data)
         // Prefer decoding only on success so Trakt error payloads never surface as
         // cryptic Decodable cast failures for TraktDeviceCodeResponse / tokens.
@@ -822,14 +987,16 @@ final class TraktAuthService {
                     statusCode: http.statusCode,
                     value: nil,
                     errorMessage: rawError
-                        ?? "Trakt response could not be read (\(error.localizedDescription))."
+                        ?? "Trakt response could not be read (\(error.localizedDescription)).",
+                    headers: headers
                 )
             }
         }
         return HTTPResult(
             statusCode: http.statusCode,
             value: value,
-            errorMessage: Self.friendlyTraktError(rawError, status: http.statusCode)
+            errorMessage: Self.friendlyTraktError(rawError, status: http.statusCode),
+            headers: headers
         )
     }
 
@@ -937,8 +1104,20 @@ struct TraktProgressService {
         }
     }
 
+    private static let checkpointDirectoryName = "traktCheckpoints"
+
     private static func loadCheckpoints() -> [LocalPlaybackCheckpoint] {
-        guard let data = UserDefaults.standard.data(forKey: checkpointStorageKey),
+        let data: Data? = {
+            if let fileData = LargePayloadStore.read(key: checkpointStorageKey, directory: checkpointDirectoryName) {
+                return fileData
+            }
+            guard let legacy = UserDefaults.standard.data(forKey: checkpointStorageKey) else { return nil }
+            if LargePayloadStore.write(legacy, key: checkpointStorageKey, directory: checkpointDirectoryName) {
+                UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
+            }
+            return legacy
+        }()
+        guard let data,
               let decoded = try? checkpointDecoder().decode(
                   [LocalPlaybackCheckpoint].self,
                   from: data
@@ -950,11 +1129,14 @@ struct TraktProgressService {
 
     private static func saveCheckpoints(_ checkpoints: [LocalPlaybackCheckpoint]) {
         guard !checkpoints.isEmpty else {
+            LargePayloadStore.remove(key: checkpointStorageKey, directory: checkpointDirectoryName)
             UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
             return
         }
         guard let data = try? checkpointEncoder().encode(checkpoints) else { return }
-        UserDefaults.standard.set(data, forKey: checkpointStorageKey)
+        if LargePayloadStore.write(data, key: checkpointStorageKey, directory: checkpointDirectoryName) {
+            UserDefaults.standard.removeObject(forKey: checkpointStorageKey)
+        }
     }
 
     private static func checkpointEncoder() -> JSONEncoder {
@@ -1017,6 +1199,7 @@ struct TraktProgressService {
 
         let profileId = ContinueWatchingStore.activeProfileId
         let source = sourceOverride ?? TraktSettingsStore.watchProgressSource
+        let completionPercent = source == .mdblist ? MdbListProgressService.completionPercent : Self.completionPercent
         // Going back to a title retires the removal the user made earlier, so a
         // provider row they are actively watching again is never hidden.
         ContinueWatchingDismissStore.clear(contentId: meta.id)
@@ -1144,8 +1327,22 @@ struct TraktProgressService {
             return resolvedItems
         }
 
+        if source == .mdblist {
+            guard MdbListRuntimeSession.isAuthenticated() else { return [] }
+            guard let items = await MdbListProgressService.fetchContinueWatching(
+                repository: repository
+            ) else { return nil }
+            let resolvedItems = updateDisplayedSnapshot
+                ? mergingLocalPlaybackCheckpoints(into: items, source: source)
+                : items
+            if updateDisplayedSnapshot {
+                replaceContinueWatchingSnapshot(resolvedItems, source: source)
+            }
+            return resolvedItems
+        }
+
         guard source == .trakt,
-              TraktAuthStore.state.isAuthenticated else {
+              TraktAuthStore.isAuthenticated else {
             return []
         }
 
@@ -1465,7 +1662,8 @@ struct TraktProgressService {
         action: TraktScrobbleAction,
         store: UserDefaults = ProfileSettings.current
     ) async -> Bool {
-        if TraktSettingsStore.watchProgressSource(in: store) == .simkl {
+        let source = TraktSettingsStore.watchProgressSource(in: store)
+        if source == .simkl {
             return await SimklProgressService.reportPlayback(
                 meta: meta,
                 position: position,
@@ -1476,9 +1674,21 @@ struct TraktProgressService {
                 store: store
             )
         }
+        if source == .mdblist {
+            return await MdbListProgressService.reportPlayback(
+                meta: meta,
+                position: position,
+                duration: duration,
+                season: season,
+                episode: episode,
+                action: action,
+                store: store
+            )
+        }
 
-        guard TraktSettingsStore.watchProgressSource(in: store) == .trakt,
-              TraktAuthStore.state(in: store).isAuthenticated(in: store),
+        guard source == .trakt,
+              ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store),
               position.isFinite,
               duration.isFinite,
               duration > 0,
@@ -1783,50 +1993,65 @@ struct TraktProgressService {
 
 // MARK: - Watched history
 
+/// Pagination policy for Trakt's watched endpoints. Trakt may return fewer
+/// than the requested limit while more pages still exist, so an empty page or
+/// an explicit page-count header is the only normal termination signal.
+enum TraktWatchedHistoryPagination {
+    static let pageLimit = 250
+    static let maxPages = 1_000
+
+    static func shouldFetchNextPage(
+        page: Int,
+        itemCount: Int,
+        pageCount: Int?
+    ) -> Bool {
+        guard itemCount > 0, page < maxPages else { return false }
+        if let pageCount { return page < pageCount }
+        return true
+    }
+
+    static func pageCount(from headers: [String: String]) -> Int? {
+        headers["x-pagination-page-count"]?
+            .split(separator: ",", maxSplits: 1)
+            .first
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+}
+
 /// Mirrors durable local watched/unwatched mutations to Trakt history. This is
 /// intentionally independent of the selected Continue Watching source: a
 /// connected Trakt account should receive an explicit watched action even when
 /// resume points are kept in Nuvio Sync.
 struct TraktHistoryService {
+    private struct WatchedHistoryFetchResult {
+        let items: [WatchedStoreItem]
+        let receivedResponse: Bool
+        let isComplete: Bool
+    }
+
+    @MainActor
+    private struct InFlightSync {
+        let profileId: String?
+        let generation: Int
+        let task: Task<Bool, Never>
+    }
+
+    @MainActor private static var inFlightSync: InFlightSync?
+    @MainActor private static var syncGeneration = 0
+
     /// Returns a complete Trakt watched snapshot without mutating Nuvio's
     /// watched store. Used by one-way provider transfers.
     static func fetchWatchedHistory(
         store: UserDefaults = ProfileSettings.current
     ) async -> [WatchedStoreItem]? {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store) else { return nil }
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return nil }
 
         let service = TraktAuthService(store: store)
-        guard await service.refreshTokenIfNeeded(),
-              let movies: [TraktWatchedMovieDTO] = try? await service.authorizedGet(
-                path: "sync/watched/movies"
-              ),
-              let shows: [TraktWatchedShowDTO] = try? await service.authorizedGet(
-                path: "sync/watched/shows?extended=progress"
-              ) else {
-            return nil
-        }
-
-        var remoteItems = movies.compactMap(watchedMovie)
-        guard remoteItems.count == movies.count else { return nil }
-
-        var needsHistoryFallback = false
-        for show in shows {
-            if show.seasons.orEmpty.isEmpty {
-                needsHistoryFallback = true
-            } else if let episodes = watchedEpisodes(show) {
-                remoteItems.append(contentsOf: episodes)
-            } else {
-                return nil
-            }
-        }
-
-        if needsHistoryFallback {
-            guard let historyItems = await fetchCompleteEpisodeHistory(using: service) else {
-                return nil
-            }
-            remoteItems.append(contentsOf: historyItems)
-        }
-        return WatchedStore.mergedByIdentity(remoteItems)
+        guard await service.refreshTokenIfNeeded() else { return nil }
+        let result = await fetchWatchedHistorySnapshot(using: service)
+        guard result.receivedResponse, result.isComplete else { return nil }
+        return WatchedStore.mergedByIdentity(result.items)
     }
 
     /// Pulls Trakt's complete watched snapshot into the durable store used by
@@ -1837,9 +2062,43 @@ struct TraktHistoryService {
     static func syncWatchedHistory(
         store: UserDefaults = ProfileSettings.current
     ) async -> Bool {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store) else { return false }
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return false }
 
         let targetProfileId = WatchedStore.activeProfileId
+        if let inFlightSync,
+           inFlightSync.profileId == targetProfileId {
+            return await inFlightSync.task.value
+        }
+
+        syncGeneration &+= 1
+        let generation = syncGeneration
+        let task = Task { @MainActor in
+            await performWatchedHistorySync(
+                store: store,
+                targetProfileId: targetProfileId
+            )
+        }
+        inFlightSync = InFlightSync(
+            profileId: targetProfileId,
+            generation: generation,
+            task: task
+        )
+        let result = await task.value
+        if inFlightSync?.generation == generation {
+            inFlightSync = nil
+        }
+        return result
+    }
+
+    @MainActor
+    private static func performWatchedHistorySync(
+        store: UserDefaults,
+        targetProfileId: String?
+    ) async -> Bool {
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store) else { return false }
+
         let service = TraktAuthService(store: store)
         guard await service.refreshTokenIfNeeded() else { return false }
 
@@ -1858,22 +2117,51 @@ struct TraktHistoryService {
             )
         }
         let syncStartedAt = Date()
+        let result = await fetchWatchedHistorySnapshot(using: service)
+        guard result.receivedResponse else { return false }
+        // Network requests above can outlive the profile that initiated them.
+        // Never apply one profile's Trakt account to another profile's store.
+        guard WatchedStore.activeProfileId == targetProfileId else { return false }
+        guard result.isComplete else {
+            // A partial response is still useful for importing new marks, but
+            // absence is authoritative only when both Trakt collections loaded.
+            return WatchedStore.mergeRemote(
+                result.items.map { $0.adding(source: .trakt) },
+                confirmsTombstoneDeletions: false
+            )
+        }
+        return WatchedStore.reconcileTraktSnapshot(
+            result.items,
+            syncStartedAt: syncStartedAt
+        )
+    }
 
-        var receivedResponse = false
-        var receivedCompleteSnapshot = true
+    private static func fetchWatchedHistorySnapshot(
+        using service: TraktAuthService
+    ) async -> WatchedHistoryFetchResult {
         var remoteItems: [WatchedStoreItem] = []
+        var receivedResponse = false
+        var isComplete = true
 
-        if let movies: [TraktWatchedMovieDTO] = try? await service.authorizedGet(
-            path: "sync/watched/movies"
+        if let movies: [TraktWatchedMovieDTO] = await fetchWatchedPages(
+            using: service,
+            path: { page in
+                "sync/watched/movies?page=\(page)&limit=\(TraktWatchedHistoryPagination.pageLimit)"
+            }
         ) {
             receivedResponse = true
-            remoteItems.append(contentsOf: movies.compactMap(watchedMovie))
+            let converted = movies.compactMap(watchedMovie)
+            if converted.count != movies.count { isComplete = false }
+            remoteItems.append(contentsOf: converted)
         } else {
-            receivedCompleteSnapshot = false
+            isComplete = false
         }
 
-        if let shows: [TraktWatchedShowDTO] = try? await service.authorizedGet(
-            path: "sync/watched/shows?extended=progress"
+        if let shows: [TraktWatchedShowDTO] = await fetchWatchedPages(
+            using: service,
+            path: { page in
+                "sync/watched/shows?page=\(page)&limit=\(TraktWatchedHistoryPagination.pageLimit)&extended=progress"
+            }
         ) {
             receivedResponse = true
             var needsHistoryFallback = false
@@ -1883,7 +2171,7 @@ struct TraktHistoryService {
                 } else if let episodes = watchedEpisodes(show) {
                     remoteItems.append(contentsOf: episodes)
                 } else {
-                    receivedCompleteSnapshot = false
+                    isComplete = false
                 }
             }
 
@@ -1891,29 +2179,50 @@ struct TraktHistoryService {
                 if let historyItems = await fetchCompleteEpisodeHistory(using: service) {
                     remoteItems.append(contentsOf: historyItems)
                 } else {
-                    receivedCompleteSnapshot = false
+                    isComplete = false
                 }
             }
         } else {
-            receivedCompleteSnapshot = false
+            isComplete = false
         }
 
-        guard receivedResponse else { return false }
-        // Network requests above can outlive the profile that initiated them.
-        // Never apply one profile's Trakt account to another profile's store.
-        guard WatchedStore.activeProfileId == targetProfileId else { return false }
-        guard receivedCompleteSnapshot else {
-            // A partial response is still useful for importing new marks, but
-            // absence is authoritative only when both Trakt collections loaded.
-            return WatchedStore.mergeRemote(
-                remoteItems.map { $0.adding(source: .trakt) },
-                confirmsTombstoneDeletions: false
-            )
-        }
-        return WatchedStore.reconcileTraktSnapshot(
-            remoteItems,
-            syncStartedAt: syncStartedAt
+        return WatchedHistoryFetchResult(
+            items: WatchedStore.mergedByIdentity(remoteItems),
+            receivedResponse: receivedResponse,
+            isComplete: isComplete
         )
+    }
+
+    private static func fetchWatchedPages<T: Decodable>(
+        using service: TraktAuthService,
+        path: (Int) -> String
+    ) async -> [T]? {
+        var items: [T] = []
+        var page = 1
+
+        while page <= TraktWatchedHistoryPagination.maxPages {
+            guard let response: HTTPResult<[T]> = try? await service.authorizedGetResult(
+                path: path(page)
+            ),
+            (200..<300).contains(response.statusCode),
+            let pageItems = response.value else {
+                return nil
+            }
+
+            if pageItems.isEmpty { return items }
+            items.append(contentsOf: pageItems)
+
+            guard TraktWatchedHistoryPagination.shouldFetchNextPage(
+                page: page,
+                itemCount: pageItems.count,
+                pageCount: TraktWatchedHistoryPagination.pageCount(from: response.headers)
+            ) else {
+                return items
+            }
+            page += 1
+        }
+
+        return nil
     }
 
     static func setWatched(
@@ -1944,7 +2253,8 @@ struct TraktHistoryService {
         store: UserDefaults = ProfileSettings.current,
         notifyChange: Bool = true
     ) async -> Bool {
-        guard TraktAuthStore.state(in: store).isAuthenticated(in: store),
+        guard ProfileSettings.isActiveStore(store),
+              TraktAuthStore.isAuthenticated(in: store),
               let mutation = mutation(
                 for: meta,
                 season: season,
@@ -2350,7 +2660,7 @@ struct TraktLibraryService {
     /// instead of writing only to the hidden local library.
     static func setWatchlist(_ meta: NuvioMeta, isInWatchlist: Bool) async -> Bool {
         guard TraktSettingsStore.librarySourceMode == .trakt,
-              TraktAuthStore.state.isAuthenticated,
+              TraktAuthStore.isAuthenticated,
               let body = watchlistMutation(for: meta) else {
             return false
         }
@@ -2380,7 +2690,7 @@ struct TraktLibraryService {
         requireSelectedSource: Bool = true
     ) async -> [LibraryStoreItem]? {
         guard (!requireSelectedSource || TraktSettingsStore.librarySourceMode == .trakt),
-              TraktAuthStore.state.isAuthenticated else {
+              TraktAuthStore.isAuthenticated else {
             return []
         }
 
@@ -2615,6 +2925,7 @@ private struct HTTPResult<T: Decodable> {
     let statusCode: Int
     let value: T?
     let errorMessage: String?
+    let headers: [String: String]
 
     func valueOrThrow() throws -> T {
         guard (200..<300).contains(statusCode) else {
@@ -2681,7 +2992,7 @@ final class TraktSettingsViewModel: ObservableObject {
         deviceCodeExpiresAtMillis = state.expiresAt
         tokenExpiresAtMillis = state.tokenExpiresAtMillis
         pollInterval = state.pollInterval ?? 5
-        let isAuthenticated = state.isAuthenticated(in: store)
+        let isAuthenticated = TraktAuthStore.isAuthenticated(in: store)
         mode = isAuthenticated
             ? .connected
             : (state.hasActiveDeviceFlow(in: store) ? .awaitingApproval : .disconnected)

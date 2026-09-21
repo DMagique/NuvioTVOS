@@ -165,15 +165,19 @@ struct PlaybackDebugInfo: Equatable {
 @MainActor
 protocol PlaybackEngineControlling: AnyObject {
     var onPlaybackSuspended: ((Int64, Int64) -> Void)? { get set }
+    var onFirstFrameReady: (() -> Void)? { get set }
 
     var audioTracks: [PlaybackTrackInfo] { get }
     var subtitleTracks: [PlaybackTrackInfo] { get }
 
     var isPlayerLoading: Bool { get }
     var isPlayerPlaying: Bool { get }
+    /// Backend transport truth for directional toggles; unlike `isPlayerPlaying`, this is not a UI mirror.
+    var isTransportPlaying: Bool { get }
     var isPlayerEnded: Bool { get }
     var isAtEndOfFile: Bool { get }
     var hasCoherentTimeSample: Bool { get }
+    var hasFirstFrameReadyForDisplay: Bool { get }
     var durationMs: Int64 { get }
     var positionMs: Int64 { get }
     var bufferedMs: Int64 { get }
@@ -198,6 +202,15 @@ protocol PlaybackEngineControlling: AnyObject {
     func applySubtitleStyle()
     func destroyPlayer()
     func refreshPlaybackState()
+}
+
+enum PlaybackToggleDirection: Equatable {
+    case play
+    case pause
+
+    init(isTransportPlaying: Bool) {
+        self = isTransportPlaying ? .pause : .play
+    }
 }
 
 /// Diagnostics and host system telemetry sampler for the playback debug overlay.

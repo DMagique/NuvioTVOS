@@ -121,8 +121,13 @@ enum WatchProgressLedger {
         if cachedKey == key, let cachedRecords {
             return cachedRecords
         }
-        guard let data = storedData(forKey: key),
-              let decoded = try? JSONDecoder().decode([WatchProgressRecord].self, from: data) else {
+        guard let data = storedData(forKey: key) else {
+            cachedRecords = []
+            cachedKey = key
+            return []
+        }
+        guard let decoded = try? JSONDecoder().decode([WatchProgressRecord].self, from: data) else {
+            LargePayloadStore.remove(key: key, directory: storageDirectoryName)
             cachedRecords = []
             cachedKey = key
             return []
@@ -416,6 +421,9 @@ enum WatchProgressLedger {
         )
         guard let data = try? JSONEncoder().encode(trimmed) else { return false }
         let key = storageKey
+        if cachedKey == key, let cachedRecords, cachedRecords == trimmed {
+            return true
+        }
         guard LargePayloadStore.write(data, key: key, directory: storageDirectoryName) else {
             // No preferences fallback: the ledger shares its budget with every
             // other key in the plist, and an oversized write aborts the process.

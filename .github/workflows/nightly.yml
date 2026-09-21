@@ -99,10 +99,9 @@ jobs:
           swift --version
           git rev-parse --short HEAD
 
-      - name: Install CocoaPods
+      - name: Install Tuist
         if: steps.build_gate.outputs.should_skip != 'true'
-        working-directory: tvosApp
-        run: pod install
+        run: brew install tuist
 
       - name: Build unsigned IPA
         if: steps.build_gate.outputs.should_skip != 'true'

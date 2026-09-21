@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Thread-safe mirror of the active session's starvation inputs for extractor yield closures,
 /// which run on the extractor's decode queue off the main actor. MainActor writes (load / stop /
@@ -91,5 +92,22 @@ extension AetherEngine {
                 consecutiveHealthyTicks: snap.consecutiveHealthyTicks
             )
         }
+    }
+
+    /// Captures the currently displayed video frame directly from the active playback pipeline.
+    /// Operates directly on the decoded CVPixelBuffer in presentation memory.
+    ///
+    /// Guarantees:
+    /// - 0 additional HTTP range requests
+    /// - 0 secondary demuxers
+    /// - 0 secondary video decoders
+    public func captureCurrentVideoFrame(maxWidth: Int = 320) -> CGImage? {
+        if let softwareHost {
+            return softwareHost.captureCurrentFrame(maxWidth: maxWidth)
+        }
+        if let nativeHost {
+            return nativeHost.captureCurrentFrame(maxWidth: maxWidth)
+        }
+        return nil
     }
 }

@@ -11,6 +11,8 @@ private enum DiscoverGridMetrics {
 /// The host provides the outer title, padding and background.
 struct DiscoverSection: View {
     let onContentClick: (String, String) -> Void
+    let isBesideKeyboard: Bool
+    let columnCount: Int?
     var onLongPress: ((NuvioMeta) -> Void)? = nil
     /// Lets an embedded host react to moving into a card or out of the
     /// Discover controls entirely (the Netflix Search host uses this to
@@ -37,12 +39,15 @@ struct DiscoverSection: View {
     /// when the tab view gets disabled (overlay up), consumed on re-enable.
     @State private var overlayRestoreCardID: String?
     @State private var overlayRestoreGeneration = 0
+    @State private var scrollToTopGeneration = 0
     @Environment(\.isEnabled) private var isEnabled
     @Binding private var parentTransitionActive: Bool
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
 
     init(
         onContentClick: @escaping (String, String) -> Void,
+        isBesideKeyboard: Bool = false,
+        columnCount: Int? = nil,
         onLongPress: ((NuvioMeta) -> Void)? = nil,
         onCardFocus: (() -> Void)? = nil,
         onFilterFocus: (() -> Void)? = nil,
@@ -50,6 +55,8 @@ struct DiscoverSection: View {
         parentTransitionActive: Binding<Bool>
     ) {
         self.onContentClick = onContentClick
+        self.isBesideKeyboard = isBesideKeyboard
+        self.columnCount = columnCount
         self.onLongPress = onLongPress
         self.onCardFocus = onCardFocus
         self.onFilterFocus = onFilterFocus
@@ -106,6 +113,7 @@ struct DiscoverSection: View {
                 restoreOverlayFocus(to: target, generation: overlayRestoreGeneration)
             }
         }
+        .onExitCommand(perform: canHandleExitCommand ? scrollDiscoverToTop : nil)
     }
 
     /// Arms the restore flag only after focus has stayed off the cards long
@@ -135,6 +143,27 @@ struct DiscoverSection: View {
                 parentTransitionActive = false
             }
         }
+    }
+
+    /// Consume Menu only while Discover has something to back out of. Once the
+    /// first card is focused, leaving the handler nil lets the enclosing tab
+    /// view reveal its sidebar on the next Menu press.
+    private var canHandleExitCommand: Bool {
+        guard isEnabled,
+              overlayRestoreCardID == nil,
+              !parentTransitionActive,
+              let first = visibleItems.first else { return false }
+        return focusedCardID != first.id || focusedElementID?.hasPrefix("filter:") == true
+    }
+
+    /// Back on Discover keeps the keyboard state unchanged and returns the
+    /// vertical grid/focus to its first card.
+    private func scrollDiscoverToTop() {
+        scrollToTopGeneration &+= 1
+        shouldRestoreFocus = false
+        guard let first = visibleItems.first else { return }
+        focusedCardID = first.id
+        focusedElementID = "card:\(first.id)"
     }
 
     // MARK: - Filters (dropdown menus)
@@ -224,35 +253,47 @@ struct DiscoverSection: View {
     }
 
     private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: DiscoverGridMetrics.posterGap) {
-                ForEach(visibleItems) { item in
-                    DiscoverCard(
-                        meta: item,
-                        externalFocus: $focusedCardID,
-                        onFocusChange: { updateDiscoverFocus("card:\(item.id)", isFocused: $0) },
-                        retainFocusAppearance: overlayRestoreCardID == item.id,
-                        onLongPress: onLongPress.map { cb in { cb(item) } }
-                    ) {
-                        parentTransitionActive = true
-                        overlayRestoreCardID = item.id
-                        lastFocusedCardID = item.id
-                        onContentClick(item.id, item.type)
+        ScrollViewReader { proxy in
+            ScrollView {
+                Color.clear
+                    .frame(height: 1)
+                    .id("discover-grid-top")
+
+                LazyVGrid(columns: columns, alignment: .leading, spacing: posterGap) {
+                    ForEach(visibleItems) { item in
+                        DiscoverCard(
+                            posterWidth: posterWidth,
+                            meta: item,
+                            externalFocus: $focusedCardID,
+                            onFocusChange: { updateDiscoverFocus("card:\(item.id)", isFocused: $0) },
+                            retainFocusAppearance: overlayRestoreCardID == item.id,
+                            onLongPress: onLongPress.map { cb in { cb(item) } }
+                        ) {
+                            parentTransitionActive = true
+                            overlayRestoreCardID = item.id
+                            lastFocusedCardID = item.id
+                            onContentClick(item.id, item.type)
+                        }
+                        .disabled(overlayRestoreCardID != nil && overlayRestoreCardID != item.id)
+                        .onAppear { viewModel.loadMoreIfNeeded(currentItem: item) }
                     }
-                    .disabled(overlayRestoreCardID != nil && overlayRestoreCardID != item.id)
-                    .onAppear { viewModel.loadMoreIfNeeded(currentItem: item) }
+                }
+                .padding(.top, 16)
+                .padding(.horizontal, 12)
+
+                if viewModel.isLoadingMore {
+                    ProgressView()
+                        .tint(.white)
+                        .padding(.vertical, 28)
+                }
+
+                Color.clear.frame(height: 60)
+            }
+            .onChange(of: scrollToTopGeneration) { _, _ in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo("discover-grid-top", anchor: .top)
                 }
             }
-            .padding(.top, 16)
-            .padding(.horizontal, 12)
-
-            if viewModel.isLoadingMore {
-                ProgressView()
-                    .tint(.white)
-                    .padding(.vertical, 28)
-            }
-
-            Color.clear.frame(height: 60)
         }
         // This is a vertical grid beneath fixed controls. Its focused cards
         // must remain inside the viewport instead of spilling upward over the
@@ -262,10 +303,16 @@ struct DiscoverSection: View {
         .defaultFocusIfAvailable($focusedCardID, shouldRestoreFocus ? lastFocusedCardID : nil)
     }
 
+    private var posterWidth: CGFloat { DiscoverGridMetrics.posterWidth }
+    private var posterGap: CGFloat { isBesideKeyboard || columnCount != nil ? 24 : DiscoverGridMetrics.posterGap }
+
     private var columns: [GridItem] {
-        [GridItem(
-            .adaptive(minimum: DiscoverGridMetrics.posterWidth, maximum: DiscoverGridMetrics.posterWidth),
-            spacing: DiscoverGridMetrics.posterGap,
+        if let count = isBesideKeyboard ? 5 : columnCount {
+            return Array(repeating: GridItem(.fixed(posterWidth), spacing: posterGap, alignment: .top), count: count)
+        }
+        return [GridItem(
+            .adaptive(minimum: posterWidth, maximum: posterWidth),
+            spacing: posterGap,
             alignment: .top
         )]
     }
@@ -360,6 +407,8 @@ struct FilterMenu<MenuContent: View>: View {
 // MARK: - Card
 
 private struct DiscoverCard: View {
+    var posterWidth: CGFloat = DiscoverGridMetrics.posterWidth
+    private var posterHeight: CGFloat { posterWidth * 1.5 }
     let meta: NuvioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
     var onFocusChange: ((Bool) -> Void)? = nil
@@ -386,9 +435,9 @@ private struct DiscoverCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 CachedPosterArtwork(
                     urlString: meta.posterUrl,
-                    width: DiscoverGridMetrics.posterWidth,
-                    height: DiscoverGridMetrics.posterHeight,
-                    maximumWidth: DiscoverGridMetrics.posterWidth
+                    width: posterWidth,
+                    height: posterHeight,
+                    maximumWidth: posterWidth
                 ) {
                     ZStack {
                         Rectangle().fill(Color.white.opacity(0.07))
@@ -397,7 +446,7 @@ private struct DiscoverCard: View {
                             .foregroundColor(.white.opacity(0.25))
                     }
                 }
-                .frame(width: DiscoverGridMetrics.posterWidth, height: DiscoverGridMetrics.posterHeight)
+                .frame(width: posterWidth, height: posterHeight)
                 .clipShape(shape)
                 .modifier(
                     LiquidGlassCardModifier(
@@ -426,7 +475,7 @@ private struct DiscoverCard: View {
                                 .foregroundColor(.white.opacity(0.45))
                         }
                     }
-                    .frame(width: DiscoverGridMetrics.posterWidth, alignment: .leading)
+                    .frame(width: posterWidth, alignment: .leading)
                 }
             }
             .scaleEffect(showsFocusedAppearance ? 1.06 : 1.0)

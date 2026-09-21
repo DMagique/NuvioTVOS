@@ -184,14 +184,37 @@ final class JellyfinLibraryIndex: ObservableObject {
         persist()
     }
 
+    private static let storageDirectoryName = "jellyfinLibraryIndex"
+    private static var storageKey: String {
+        let profileId = ProfileSettings.activeProfileID ?? "default"
+        return "jellyfinLibraryIndex.\(profileId)"
+    }
+
     private func persist() {
         guard let data = try? JSONEncoder().encode(titlesByServerID) else { return }
-        ProfileSettings.current.set(data, forKey: SettingsKey.jellyfinLibraryIndex)
+        if LargePayloadStore.write(data, key: Self.storageKey, directory: Self.storageDirectoryName) {
+            ProfileSettings.current.removeObject(forKey: SettingsKey.jellyfinLibraryIndex)
+            UserDefaults.standard.removeObject(forKey: SettingsKey.jellyfinLibraryIndex)
+        }
         NotificationCenter.default.post(name: Self.changedNotification, object: nil)
     }
 
     private static func load() -> [String: [JellyfinIndexedTitle]] {
-        guard let data = ProfileSettings.current.data(forKey: SettingsKey.jellyfinLibraryIndex),
+        let key = storageKey
+        let data: Data? = {
+            if let fileData = LargePayloadStore.read(key: key, directory: storageDirectoryName) {
+                return fileData
+            }
+            guard let legacy = ProfileSettings.current.data(forKey: SettingsKey.jellyfinLibraryIndex) ?? UserDefaults.standard.data(forKey: SettingsKey.jellyfinLibraryIndex) else {
+                return nil
+            }
+            if LargePayloadStore.write(legacy, key: key, directory: storageDirectoryName) {
+                ProfileSettings.current.removeObject(forKey: SettingsKey.jellyfinLibraryIndex)
+                UserDefaults.standard.removeObject(forKey: SettingsKey.jellyfinLibraryIndex)
+            }
+            return legacy
+        }()
+        guard let data,
               let decoded = try? JSONDecoder().decode([String: [JellyfinIndexedTitle]].self, from: data) else {
             return [:]
         }

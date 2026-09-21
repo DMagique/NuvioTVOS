@@ -34,6 +34,14 @@ final class NuvioSyncManager: ObservableObject {
         NuvioAPIClient.mergeHomeCatalogItems(local: local, remote: remote)
     }
 
+    @discardableResult
+    nonisolated static func applyHomeCatalogSettings(
+        _ payload: HomeCatalogSyncPayload,
+        localProfileId: String
+    ) -> Bool {
+        NuvioAPIClient().applyHomeCatalogSettings(payload, localProfileId: localProfileId)
+    }
+
     /// True from sign-in until the first profile pull has been applied (or the
     /// pull fails), so the who's-watching screen can wait for real profile
     /// names instead of rendering local stubs.
@@ -902,7 +910,7 @@ final class NuvioSyncManager: ObservableObject {
 
     /// One wording for the state where the account is still configured on this
     /// Apple TV but its session can no longer be renewed.
-    static let reauthenticationMessage =
+    nonisolated static let reauthenticationMessage =
         "Your Nuvio session expired. Sign in again to resume syncing."
 
     private func pullThenPush(generation: UInt) async {
@@ -1486,9 +1494,14 @@ final class NuvioSyncManager: ObservableObject {
         case .nuvioSync:
             return true
         case .trakt:
-            return !TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return !TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
             return !SimklAuthStore.state(in: store, profileScope: profileId).isAuthenticated(in: store)
+        case .mdblist:
+            return !MdbListRuntimeSession.isAuthenticated(
+                in: store,
+                profileScope: profileId
+            )
         }
     }
 
@@ -1504,9 +1517,14 @@ final class NuvioSyncManager: ObservableObject {
         case .local:
             return true
         case .trakt:
-            return !TraktAuthStore.state(in: store).isAuthenticated(in: store)
+            return !TraktAuthStore.isAuthenticated(in: store)
         case .simkl:
             return !SimklAuthStore.state(in: store, profileScope: profileId).isAuthenticated(in: store)
+        case .mdblist:
+            return !MdbListRuntimeSession.isAuthenticated(
+                in: store,
+                profileScope: profileId
+            )
         }
     }
 
@@ -1898,6 +1916,8 @@ enum PlayerSettingsSyncMapper {
         ("subtitle_use_forced_subtitles", SettingsKey.forcedSubtitles),
         ("stream_auto_play_next_episode_enabled", SettingsKey.autoPlayNext),
         ("stream_auto_play_timeout_seconds", SettingsKey.autoPlayNextCountdown),
+        ("stream_auto_play_prefer_binge_group", SettingsKey.streamAutoPlayPreferBingeGroup),
+        ("stream_auto_play_reuse_binge_group", SettingsKey.streamAutoPlayReuseBingeGroup),
         ("stream_cached_only", SettingsKey.cachedOnlyStreams),
         ("cached_only_streams", SettingsKey.cachedOnlyStreams),
         ("stream_sort_mode", SettingsKey.streamSortOption),
@@ -1909,7 +1929,8 @@ enum PlayerSettingsSyncMapper {
         ("player_show_pip", SettingsKey.playerShowPiP),
         ("player_show_episodes", SettingsKey.playerShowEpisodes),
         ("player_show_sources", SettingsKey.playerShowSources),
-        ("player_show_subtitles", SettingsKey.playerShowSubtitles)
+        ("player_show_subtitles", SettingsKey.playerShowSubtitles),
+        ("seek_preview_enabled", SettingsKey.seekPreviewEnabled)
     ]
 
     static let localToRemoteKeyMappings: [(local: String, remote: String)] = [
@@ -1919,6 +1940,8 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.forcedSubtitles, "subtitle_use_forced_subtitles"),
         (SettingsKey.autoPlayNext, "stream_auto_play_next_episode_enabled"),
         (SettingsKey.autoPlayNextCountdown, "stream_auto_play_timeout_seconds"),
+        (SettingsKey.streamAutoPlayPreferBingeGroup, "stream_auto_play_prefer_binge_group"),
+        (SettingsKey.streamAutoPlayReuseBingeGroup, "stream_auto_play_reuse_binge_group"),
         (SettingsKey.cachedOnlyStreams, "stream_cached_only"),
         (SettingsKey.streamSortOption, "stream_sort_mode"),
         (SettingsKey.smartStreamSelection, "smart_stream_selection"),
@@ -1929,7 +1952,8 @@ enum PlayerSettingsSyncMapper {
         (SettingsKey.playerShowPiP, "player_show_pip"),
         (SettingsKey.playerShowEpisodes, "player_show_episodes"),
         (SettingsKey.playerShowSources, "player_show_sources"),
-        (SettingsKey.playerShowSubtitles, "player_show_subtitles")
+        (SettingsKey.playerShowSubtitles, "player_show_subtitles"),
+        (SettingsKey.seekPreviewEnabled, "seek_preview_enabled")
     ]
 
     static func exportPayload(
@@ -2008,21 +2032,8 @@ enum PlayerSettingsSyncMapper {
 
         if let translated = autoPlayModeFromWire(rawAutoPlayMode) {
             defaults.set(translated.useTopResult, forKey: SettingsKey.smartStreamUseTopResult)
-            if translated.smartSelection {
-                defaults.set(true, forKey: SettingsKey.smartStreamSelection)
-            } else {
-                let remoteHasExplicitSmartSelection: Bool = {
-                    if let raw = remote[smartStreamSelectionRemoteKey] {
-                        if let dict = raw as? [String: Any] {
-                            return (decodeValue(dict) as? Bool) ?? (dict["value"] as? Bool) ?? false
-                        }
-                        return (raw as? Bool) ?? false
-                    }
-                    return false
-                }()
-                if !remoteHasExplicitSmartSelection {
-                    defaults.set(false, forKey: SettingsKey.smartStreamSelection)
-                }
+            if remote[smartStreamSelectionRemoteKey] == nil {
+                defaults.set(translated.smartSelection, forKey: SettingsKey.smartStreamSelection)
             }
         } else if let rawTopResult = remote[smartStreamUseTopResultRemoteKey] {
             let useTop: Bool = {
@@ -2351,6 +2362,9 @@ fileprivate final class NuvioAPIClient {
         let didChange = currentPreferences != preferences
         if didChange {
             CinemetaCatalogRepository.setConfiguredStreamAddonPreferences(preferences, in: defaults)
+            Task {
+                await StremioManifestDataCache.shared.clear()
+            }
         }
         return (preferences.filter(\.enabled).count, didChange)
     }
@@ -2502,26 +2516,40 @@ fileprivate final class NuvioAPIClient {
             .map(\.collectionId)
             .filter { !$0.isEmpty }
 
+        var customTitles: [String: String] = [:]
+        for item in catalogItems where !item.customTitle.isEmpty {
+            let key = "\(item.addonId)_\(item.type)_\(item.catalogId)"
+            customTitles[key] = item.customTitle
+        }
+        for item in collectionItems where !item.customTitle.isEmpty {
+            let key = "collection_\(item.collectionId)"
+            customTitles[key] = item.customTitle
+        }
+
         let defaults = ProfileSettings.store(for: localProfileId)
         let currentOrderData = defaults.data(forKey: SettingsKey.homeCatalogSyncedOrder)
         let currentDisabledData = defaults.data(forKey: SettingsKey.homeCatalogDisabled)
         let currentDisabledColData = defaults.data(forKey: SettingsKey.homeCollectionDisabled)
+        let currentCustomTitlesData = defaults.data(forKey: SettingsKey.homeCatalogCustomTitles)
         let currentShowType = defaults.object(forKey: SettingsKey.homeCatalogShowType) as? Bool
 
         let newOrderData = try? JSONEncoder().encode(orderKeys)
         let newDisabledData = try? JSONEncoder().encode(disabledKeys)
         let newDisabledColData = try? JSONEncoder().encode(disabledCollectionIds)
+        let newCustomTitlesData = try? JSONEncoder().encode(customTitles)
         let newShowType = payload.showCatalogType
 
         let didChange = (currentOrderData != newOrderData)
             || (currentDisabledData != newDisabledData)
             || (currentDisabledColData != newDisabledColData)
+            || (currentCustomTitlesData != newCustomTitlesData)
             || (currentShowType ?? true) != newShowType
 
         if didChange {
             if let newOrderData { defaults.set(newOrderData, forKey: SettingsKey.homeCatalogSyncedOrder) }
             if let newDisabledData { defaults.set(newDisabledData, forKey: SettingsKey.homeCatalogDisabled) }
             if let newDisabledColData { defaults.set(newDisabledColData, forKey: SettingsKey.homeCollectionDisabled) }
+            if let newCustomTitlesData { defaults.set(newCustomTitlesData, forKey: SettingsKey.homeCatalogCustomTitles) }
             defaults.set(newShowType, forKey: SettingsKey.homeCatalogShowType)
         }
         return didChange
@@ -3058,6 +3086,14 @@ fileprivate final class NuvioAPIClient {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+    private func executeWithConnectionRetry(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.data(for: request)
+        } catch let error as URLError where error.code == .networkConnectionLost {
+            return try await session.data(for: request)
+        }
+    }
+
     private func rest<T: Decodable>(
         _ path: String,
         session authSession: AuthSession
@@ -3074,7 +3110,7 @@ fileprivate final class NuvioAPIClient {
         request.setValue("Bearer \(authSession.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await executeWithConnectionRetry(request)
         guard let http = response as? HTTPURLResponse else {
             throw AuthError(message: "No response from server")
         }
@@ -3106,7 +3142,7 @@ fileprivate final class NuvioAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.httpBody = try JSONSerialization.data(withJSONObject: params)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await executeWithConnectionRetry(request)
         guard let http = response as? HTTPURLResponse else {
             throw AuthError(message: "No response from server")
         }
@@ -3123,7 +3159,6 @@ fileprivate final class NuvioAPIClient {
     private func exportStreamBadgeSettings(localProfileId: String) -> [String: Any] {
         let defaults = ProfileSettings.store(for: localProfileId)
         let mappings: [(String, String)] = [
-            (SettingsKey.streamBadgeRules, "stream_badge_rules"),
             (SettingsKey.showFileSizeBadges, "show_file_size_badges"),
             (SettingsKey.showAddonLogo, "show_addon_logo"),
             (SettingsKey.streamBadgePlacement, "stream_badge_placement")
@@ -3134,6 +3169,10 @@ fileprivate final class NuvioAPIClient {
                   let encoded = Self.encodeSettingValue(value) else { continue }
             feature[remoteKey] = encoded
         }
+        if let rulesJSON = StreamBadgeSettingsStore.rawRulesJSON(for: localProfileId),
+           let encoded = Self.encodeSettingValue(rulesJSON) {
+            feature["stream_badge_rules"] = encoded
+        }
         return feature
     }
 
@@ -3141,7 +3180,6 @@ fileprivate final class NuvioAPIClient {
         guard let remote else { return }
         let defaults = ProfileSettings.store(for: localProfileId)
         let mappings: [(String, String)] = [
-            ("stream_badge_rules", SettingsKey.streamBadgeRules),
             ("show_file_size_badges", SettingsKey.showFileSizeBadges),
             ("show_addon_logo", SettingsKey.showAddonLogo),
             ("stream_badge_placement", SettingsKey.streamBadgePlacement)
@@ -3150,6 +3188,7 @@ fileprivate final class NuvioAPIClient {
         // Android's replaceFromSyncPayload clears the feature before applying
         // the remote values, so omitted optional values do not leave stale
         // settings from the previous profile/account behind.
+        defaults.removeObject(forKey: SettingsKey.streamBadgeRules)
         mappings.forEach { _, localKey in
             defaults.removeObject(forKey: localKey)
         }
@@ -3163,7 +3202,19 @@ fileprivate final class NuvioAPIClient {
                 defaults.set(value, forKey: localKey)
             }
         }
-        StreamBadgeSettingsStore.postChanged()
+
+        // Stream badge rules are large JSON structures that must never be written
+        // to UserDefaults, otherwise cfprefsd triggers __CFPREFERENCES_HAS_DETECTED_THIS_APP_TRYING_TO_STORE_TOO_MUCH_DATA__.
+        let rawRules: String?
+        if let encoded = remote["stream_badge_rules"] as? [String: Any],
+           let value = Self.decodeSettingValue(encoded) as? String {
+            rawRules = value
+        } else if let value = remote["stream_badge_rules"] as? String {
+            rawRules = value
+        } else {
+            rawRules = nil
+        }
+        StreamBadgeSettingsStore.saveRawRulesJSON(rawRules, for: localProfileId)
     }
 
     private func exportSettings(localProfileId: String) -> [String: Any] {
@@ -3174,6 +3225,7 @@ fileprivate final class NuvioAPIClient {
             // or another TV disable account progress pulls everywhere.
             guard key != SettingsKey.accountSyncWatchState else { return }
             guard !SettingsKey.deviceLocal.contains(key) else { return }
+            guard key != SettingsKey.streamBadgeRules else { return }
             guard let value = defaults.object(forKey: key),
                   let encoded = Self.encodeSettingValue(value) else {
                 return
@@ -3188,26 +3240,12 @@ fileprivate final class NuvioAPIClient {
         SettingsKey.all.forEach { key in
             guard key != SettingsKey.accountSyncWatchState else { return }
             guard !SettingsKey.deviceLocal.contains(key) else { return }
+            guard key != SettingsKey.streamBadgeRules else { return }
             guard let encoded = remote[key] as? [String: Any],
                   let value = Self.decodeSettingValue(encoded) else {
                 return
             }
             defaults.set(value, forKey: key)
-        }
-
-        // Older clients sync only the legacy primary/secondary/tertiary keys.
-        // If such a payload supplies a primary value, make that legacy snapshot
-        // authoritative and clear omitted lower slots instead of retaining stale
-        // local choices that could make System unexpectedly filter languages.
-        if remote[SettingsKey.subtitleLanguages] == nil,
-           remote[SettingsKey.subtitleLanguage] != nil {
-            defaults.removeObject(forKey: SettingsKey.subtitleLanguages)
-            if remote[SettingsKey.subtitleLanguageSecondary] == nil {
-                defaults.set("None", forKey: SettingsKey.subtitleLanguageSecondary)
-            }
-            if remote[SettingsKey.subtitleLanguageTertiary] == nil {
-                defaults.set("None", forKey: SettingsKey.subtitleLanguageTertiary)
-            }
         }
     }
 
@@ -3879,6 +3917,7 @@ struct HomeCatalogSyncItem {
     let addonId: String
     let type: String
     let catalogId: String
+    let customTitle: String
     let enabled: Bool
     let order: Int
     let isCollection: Bool
@@ -3888,6 +3927,7 @@ struct HomeCatalogSyncItem {
         self.addonId = dictionary["addon_id"] as? String ?? ""
         self.type = dictionary["type"] as? String ?? ""
         self.catalogId = dictionary["catalog_id"] as? String ?? ""
+        self.customTitle = (dictionary["custom_title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.enabled = Self.boolValue(dictionary["enabled"], default: true)
         self.order = (dictionary["order"] as? NSNumber)?.intValue
             ?? (dictionary["order"] as? Int)

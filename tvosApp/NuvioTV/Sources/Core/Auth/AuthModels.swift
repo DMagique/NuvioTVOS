@@ -27,6 +27,7 @@ struct AuthSession: Codable, Equatable {
     var email: String?
     /// Unix epoch seconds when the access token expires (best-effort).
     var expiresAt: TimeInterval?
+    var backendIdentity: String? = nil
 
     var isExpired: Bool {
         guard let expiresAt else { return false }
@@ -72,12 +73,32 @@ struct TvLoginStartResult: Decodable {
         case pollIntervalSeconds = "poll_interval_seconds"
     }
 
+    init(code: String, webUrl: String, expiresAt: String, pollIntervalSeconds: Int = 3) {
+        self.code = code
+        self.webUrl = Self.sanitizeWebURL(webUrl, code: code)
+        self.expiresAt = expiresAt
+        self.pollIntervalSeconds = pollIntervalSeconds
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        code = try c.decode(String.self, forKey: .code)
-        webUrl = try c.decode(String.self, forKey: .webUrl)
+        let decodedCode = try c.decode(String.self, forKey: .code)
+        let rawWebUrl = try c.decode(String.self, forKey: .webUrl)
+        code = decodedCode
+        webUrl = Self.sanitizeWebURL(rawWebUrl, code: decodedCode)
         expiresAt = try c.decode(String.self, forKey: .expiresAt)
         pollIntervalSeconds = (try? c.decode(Int.self, forKey: .pollIntervalSeconds)) ?? 3
+    }
+
+    static func sanitizeWebURL(_ raw: String, code: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "\(AuthConfig.tvLoginWebBaseURL)?code=\(code)"
+        }
+        if trimmed.contains("api.nuvio.tv") {
+            return trimmed.replacingOccurrences(of: "api.nuvio.tv", with: "nuvio.tv")
+        }
+        return trimmed
     }
 }
 

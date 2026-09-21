@@ -8,14 +8,16 @@ struct PlaybackEngineCapabilities: Equatable {
     var supportsAuthoredASS: Bool
     var supportsHostSubtitleOverlay: Bool
     var supportsHTTPHeaders: Bool
+    var supportsDirectHTTPS: Bool
 
     static let aether = PlaybackEngineCapabilities(
         supportsSeparateAudioURL: false,
-        supportsAudioDelay: false,
+        supportsAudioDelay: true,
         supportsAudioAmplification: false,
         supportsAuthoredASS: false,
         supportsHostSubtitleOverlay: true,
-        supportsHTTPHeaders: true
+        supportsHTTPHeaders: true,
+        supportsDirectHTTPS: true
     )
 
     static let mpv = PlaybackEngineCapabilities(
@@ -24,6 +26,7 @@ struct PlaybackEngineCapabilities: Equatable {
         supportsAudioAmplification: true,
         supportsAuthoredASS: true,
         supportsHostSubtitleOverlay: false,
-        supportsHTTPHeaders: true
+        supportsHTTPHeaders: true,
+        supportsDirectHTTPS: false
     )
 }

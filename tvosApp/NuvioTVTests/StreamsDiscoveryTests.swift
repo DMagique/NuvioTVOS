@@ -561,26 +561,229 @@ final class StreamsDiscoveryTests: XCTestCase {
         XCTAssertFalse(manifest.supportsResource("stream", type: "series", id: "kitsu:1234"))
     }
 
-    func testAddonTransportUrlsCanonicalizesStremioTypeAliases() {
-        let manifestURL = URL(string: "https://example.com/manifest.json")!
+    // MARK: - Stream Picker Pagination & Lazy Slicing
 
-        XCTAssertEqual(
-            AddonTransportUrls.buildResourceURL(
-                manifestURL: manifestURL,
-                resource: "stream",
-                type: "tv",
-                id: "tt1234567:1:1"
-            )?.absoluteString,
-            "https://example.com/stream/series/tt1234567%3A1%3A1.json"
+    private func makePaginationTestStreams(count: Int, addon: String = "Torrentio") -> [NuvioStream] {
+        (1...count).map { i in
+            NuvioStream(
+                url: "https://example.com/stream\(i).mp4",
+                name: "Stream \(i) - 1080p",
+                description: "\(addon)\n\(i) GB",
+                addonName: addon
+            )
+        }
+    }
+
+    func testPaginatedSliceWithEmptyStreamsReturnsEmpty() {
+        let empty: [NuvioStream] = []
+        let slice = StreamPickerListBuilder.paginatedSlice(streams: empty, limit: 20)
+        XCTAssertTrue(slice.isEmpty)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: 0, currentLimit: 20))
+    }
+
+    func testPaginatedSliceWithZeroOrNegativeLimitReturnsEmpty() {
+        let streams = makePaginationTestStreams(count: 10)
+        XCTAssertTrue(StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 0).isEmpty)
+        XCTAssertTrue(StreamPickerListBuilder.paginatedSlice(streams: streams, limit: -5).isEmpty)
+    }
+
+    func testPaginatedSliceWithinFirstPage() {
+        let streams = makePaginationTestStreams(count: 50)
+        let page1 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(page1.count, 20)
+        XCTAssertEqual(page1.first?.name, "Stream 1 - 1080p")
+        XCTAssertEqual(page1.last?.name, "Stream 20 - 1080p")
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 20))
+    }
+
+    func testPaginatedSliceExpandingLimitLoadsNextPages() {
+        let streams = makePaginationTestStreams(count: 50)
+
+        let page1 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(page1.count, 20)
+
+        let page2 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 40)
+        XCTAssertEqual(page2.count, 40)
+        XCTAssertEqual(page2.first?.name, "Stream 1 - 1080p")
+        XCTAssertEqual(page2[19].name, "Stream 20 - 1080p")
+        XCTAssertEqual(page2[20].name, "Stream 21 - 1080p")
+        XCTAssertEqual(page2.last?.name, "Stream 40 - 1080p")
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 40))
+
+        let page3 = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 60)
+        XCTAssertEqual(page3.count, 50)
+        XCTAssertEqual(page3.last?.name, "Stream 50 - 1080p")
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 60))
+    }
+
+    func testPaginatedSliceWithLimitExceedingTotalCount() {
+        let streams = makePaginationTestStreams(count: 7)
+        let slice = StreamPickerListBuilder.paginatedSlice(streams: streams, limit: 20)
+        XCTAssertEqual(slice.count, 7)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: streams.count, currentLimit: 20))
+    }
+
+    func testPaginationWithDisplayedStreamsAndAddonFilter() {
+        let addon1Streams = makePaginationTestStreams(count: 30, addon: "Torrentio")
+        let addon2Streams = makePaginationTestStreams(count: 15, addon: "MediaFusion")
+        let allStreams = addon1Streams + addon2Streams
+
+        let group1 = AddonStreamGroup(
+            addonId: "torrentio",
+            displayName: "Torrentio",
+            streams: addon1Streams,
+            isLoading: false
         )
-        XCTAssertEqual(
-            AddonTransportUrls.buildResourceURL(
-                manifestURL: manifestURL,
-                resource: "stream",
-                type: "movies",
-                id: "tt1234567"
-            )?.absoluteString,
-            "https://example.com/stream/movie/tt1234567.json"
+        let group2 = AddonStreamGroup(
+            addonId: "mediafusion",
+            displayName: "MediaFusion",
+            streams: addon2Streams,
+            isLoading: false
         )
+
+        // All streams: 45 items total, 20 on first page
+        let allDisplayed = StreamPickerListBuilder.displayedStreams(
+            streams: allStreams,
+            groups: [group1, group2],
+            selectedAddonId: nil,
+            sortOption: .default,
+            includeDebrid: true
+        )
+        XCTAssertEqual(allDisplayed.count, 45)
+        let allPage1 = StreamPickerListBuilder.paginatedSlice(streams: allDisplayed, limit: 20)
+        XCTAssertEqual(allPage1.count, 20)
+        XCTAssertTrue(StreamPickerListBuilder.hasMorePages(totalCount: allDisplayed.count, currentLimit: 20))
+
+        // Filter by MediaFusion: 15 items total, 15 on first page (hasMore is false)
+        let filteredDisplayed = StreamPickerListBuilder.displayedStreams(
+            streams: allStreams,
+            groups: [group1, group2],
+            selectedAddonId: "mediafusion",
+            sortOption: .default,
+            includeDebrid: true
+        )
+        XCTAssertEqual(filteredDisplayed.count, 15)
+        let filteredPage1 = StreamPickerListBuilder.paginatedSlice(streams: filteredDisplayed, limit: 20)
+        XCTAssertEqual(filteredPage1.count, 15)
+        XCTAssertFalse(StreamPickerListBuilder.hasMorePages(totalCount: filteredDisplayed.count, currentLimit: 20))
+    }
+
+    func testSmartPlaybackSelectorEvaluatesFullStreamPool() {
+        // Construct 50 streams where only stream 48 has a 4K resolution
+        let streams = (1...50).map { i in
+            NuvioStream(
+                url: "https://example.com/stream\(i).mp4",
+                name: i == 48 ? "Movie 4K UHD Remux" : "Movie 720p WEB-DL",
+                description: "Size \(i) GB",
+                addonName: "Torrentio"
+            )
+        }
+
+        // Auto-play selector must be able to select the 4K stream regardless of UI page limit
+        let best = SmartPlaybackSelector.bestStream(
+            from: streams,
+            qualityPreference: "Highest",
+            subtitleLanguages: [],
+            shouldMatchSubtitles: false,
+            includeDebrid: true,
+            cachedOnly: false
+        )
+        XCTAssertNotNil(best)
+        XCTAssertEqual(best?.name, "Movie 4K UHD Remux")
+    }
+
+    // MARK: - AIOStreams Heterogeneous Decoding Resilience (#105)
+
+    func testAIOStreamsHeterogeneousResponseDecodesResiliently() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "AIOStream 1",
+                    "title": "Movie.2024.1080p.WEBRip",
+                    "url": "https://aiostreams.example/playback/rd/stream1.mkv",
+                    "fileIdx": "0",
+                    "sources": ["tracker:udp://tracker.example:6969", null],
+                    "behaviorHints": {
+                        "cached": 1,
+                        "videoSize": "2147483648",
+                        "proxyHeaders": {
+                            "request": {
+                                "User-Agent": "Nuvio/1.0",
+                                "Content-Length": 1024
+                            }
+                        },
+                        "storyboard": {
+                            "url": "https://aiostreams.example/storyboard.vtt"
+                        }
+                    }
+                },
+                {
+                    "name": "AIOStream 2",
+                    "title": "Movie.2024.2160p.HDR",
+                    "url": "https://aiostreams.example/playback/rd/stream2.mkv",
+                    "fileIdx": 2,
+                    "behaviorHints": {
+                        "isCached": "true",
+                        "videoSize": 5368709120.0,
+                        "storyboard": "https://aiostreams.example/storyboard2.vtt"
+                    }
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let streams = decoded.streams
+        XCTAssertNotNil(streams)
+        XCTAssertEqual(streams?.count, 2)
+
+        let s1 = try XCTUnwrap(streams?.first)
+        XCTAssertEqual(s1.fileIdx, 0)
+        XCTAssertEqual(s1.sources, ["tracker:udp://tracker.example:6969"])
+        XCTAssertEqual(s1.behaviorHints?.cached, true)
+        XCTAssertEqual(s1.behaviorHints?.videoSize, 2147483648)
+        XCTAssertEqual(s1.behaviorHints?.proxyHeaders?.request?["User-Agent"], "Nuvio/1.0")
+        XCTAssertEqual(s1.behaviorHints?.proxyHeaders?.request?["Content-Length"], "1024")
+        XCTAssertEqual(s1.behaviorHints?.storyboard, "https://aiostreams.example/storyboard.vtt")
+
+        let s2 = try XCTUnwrap(streams?.last)
+        XCTAssertEqual(s2.fileIdx, 2)
+        XCTAssertEqual(s2.behaviorHints?.isCached, true)
+        XCTAssertEqual(s2.behaviorHints?.videoSize, 5368709120)
+        XCTAssertEqual(s2.behaviorHints?.storyboard, "https://aiostreams.example/storyboard2.vtt")
+
+        let nuvio1 = s1.toNuvioStream(addonName: "AIOStreams")
+        XCTAssertNotNil(nuvio1)
+        XCTAssertEqual(nuvio1?.isCached, true)
+        XCTAssertEqual(nuvio1?.fileIdx, 0)
+        XCTAssertEqual(nuvio1?.trickplayURL?.absoluteString, "https://aiostreams.example/storyboard.vtt")
+    }
+
+    func testLossyStreamListDropsCorruptStreamWithoutFailingArray() throws {
+        let json = """
+        {
+            "streams": [
+                {
+                    "name": "Valid Stream 1",
+                    "url": "https://aiostreams.example/1.mkv"
+                },
+                "completely-invalid-non-object-stream",
+                {
+                    "name": "Valid Stream 2",
+                    "url": "https://aiostreams.example/2.mkv"
+                }
+            ]
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(StreamAddonResponse.self, from: json)
+        let streams = decoded.streams
+        XCTAssertNotNil(streams)
+        XCTAssertEqual(streams?.count, 2)
+        XCTAssertEqual(streams?.first?.name, "Valid Stream 1")
+        XCTAssertEqual(streams?.last?.name, "Valid Stream 2")
     }
 }
+
+

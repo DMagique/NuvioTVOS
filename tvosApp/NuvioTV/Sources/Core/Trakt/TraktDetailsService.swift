@@ -24,7 +24,7 @@ enum TraktDetailsService {
     private static let pageLimit = 5
 
     static var isAuthenticated: Bool {
-        TraktAuthStore.state.isAuthenticated
+        TraktAuthStore.isAuthenticated
     }
 
     static var commentsEnabled: Bool {
@@ -227,12 +227,9 @@ private struct TraktRelatedMovieDTO: Decodable {
     func toRelatedTitle() -> RelatedTitle? {
         let name = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return nil }
-        let imdbID = ids?.imdb.flatMap { imdb in
-            imdb.hasPrefix("tt") ? imdb : nil
-        }
-        let tmdbID = ids?.tmdb.map { "tmdb:\($0)" }
-        let traktID = ids?.slug.map { "trakt:\($0)" }
-        let id = imdbID ?? tmdbID ?? traktID
+        let id = ids?.imdb.flatMap { $0.hasPrefix("tt") ? $0 : nil }
+            ?? ids?.tmdb.map { "tmdb:\($0)" }
+            ?? ids?.slug.map { "trakt:\($0)" }
         guard let id else { return nil }
         return RelatedTitle(
             id: id,
@@ -256,12 +253,9 @@ private struct TraktRelatedShowDTO: Decodable {
     func toRelatedTitle() -> RelatedTitle? {
         let name = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !name.isEmpty else { return nil }
-        let imdbID = ids?.imdb.flatMap { imdb in
-            imdb.hasPrefix("tt") ? imdb : nil
-        }
-        let tmdbID = ids?.tmdb.map { "tmdb:\($0)" }
-        let traktID = ids?.slug.map { "trakt:\($0)" }
-        let id = imdbID ?? tmdbID ?? traktID
+        let id = ids?.imdb.flatMap { $0.hasPrefix("tt") ? $0 : nil }
+            ?? ids?.tmdb.map { "tmdb:\($0)" }
+            ?? ids?.slug.map { "trakt:\($0)" }
         guard let id else { return nil }
         return RelatedTitle(
             id: id,

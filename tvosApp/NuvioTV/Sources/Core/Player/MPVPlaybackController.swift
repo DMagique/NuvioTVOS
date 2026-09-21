@@ -388,6 +388,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     private var pendingLoadConfiguration: MPVLoadConfiguration?
     private var currentMediaTitle: String?
     private var currentMediaArtist: String?
+    #if os(tvOS) || os(iOS)
+    private var currentMediaArtwork: MPMediaItemArtwork?
+    private var artworkLoadTask: Task<Void, Never>?
+    #endif
     private var didConfigureMPVRemoteCommands = false
     /// Physical Apple TV can blank HDMI while matching frame rate / dynamic
     /// range. Keep the file paused until that switch finishes so playback time
@@ -405,11 +409,16 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
     var subtitleTracks: [PlaybackTrackInfo] = []
 
     // State (polled from the view model every 250ms)
+    var onFirstFrameReady: (() -> Void)?
     var isPlayerLoading: Bool = true
     var isPlayerPlaying: Bool = false
+    var isTransportPlaying: Bool { isPlayerPlaying }
     var isPlayerEnded: Bool = false
     private(set) var isAtEndOfFile: Bool = false
     private(set) var hasCoherentTimeSample: Bool = false
+    var hasFirstFrameReadyForDisplay: Bool {
+        (videoFrameSize != .zero || durationMs > 0) && isPlayerPlaying && !isPlayerLoading
+    }
     var durationMs: Int64 = 0
     var positionMs: Int64 = 0
     var bufferedMs: Int64 = 0
@@ -712,6 +721,19 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         currentMediaArtist = request.streamDescription
         PlaybackAudioSession.activateMoviePlayback()
         #if os(tvOS) || os(iOS)
+        currentMediaArtwork = nil
+        artworkLoadTask?.cancel()
+        if let artworkURL = request.artworkURL {
+            artworkLoadTask = Task { [weak self] in
+                guard let image = await BackdropImageCache.shared.image(for: artworkURL) else { return }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    self.currentMediaArtwork = MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+                    self.updateMPVNowPlayingInfo()
+                }
+            }
+        }
         setupMPVRemoteCommandsIfNeeded()
         #endif
         if Thread.isMainThread {
@@ -806,6 +828,10 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         if let artist = currentMediaArtist, !artist.isEmpty {
             info[MPMediaItemPropertyArtist] = artist
         }
+        if let artwork = currentMediaArtwork {
+            info[MPMediaItemPropertyArtwork] = artwork
+        }
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue
         info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = Double(positionMs) / 1000.0
         info[MPMediaItemPropertyPlaybackDuration] = Double(durationMs) / 1000.0
         info[MPNowPlayingInfoPropertyPlaybackRate] = isPlayerPlaying ? Double(currentSpeed) : 0.0
@@ -1206,6 +1232,9 @@ final class MPVPlayerViewController: UIViewController, PlaybackEngineControlling
         clearDisplayCriteria()
         clearPlaybackError()
         #if os(tvOS) || os(iOS)
+        artworkLoadTask?.cancel()
+        artworkLoadTask = nil
+        currentMediaArtwork = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         teardownMPVRemoteCommands()
         #endif

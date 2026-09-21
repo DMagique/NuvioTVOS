@@ -16,21 +16,27 @@ extension AetherEngine {
     /// evicted past the retention budget), or decode fails; a nil is the correct
     /// "not available yet" and hosts show time-only. `seconds` is session-timeline
     /// (seekableLiveRange axis) for live, playlist/output seconds for VOD.
-    public func scrubThumbnail(atSeconds seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+    public func scrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int = 320,
+        precise: Bool = true
+    ) async -> CGImage? {
         if isLive {
             return await liveScrubThumbnail(atSessionSeconds: seconds, maxWidth: maxWidth)
         }
-        return await vodScrubThumbnail(atSeconds: seconds, maxWidth: maxWidth)
+        return await vodScrubThumbnail(atSeconds: seconds, maxWidth: maxWidth, precise: precise)
     }
 
     /// VOD arm of `scrubThumbnail`. `!isLive` guards direct callers: `nativeVideoSession` is
     /// non-nil for live too, and `scrubThumbnailSource` no longer self-gates on isLiveSession,
     /// so a VOD decode must not run against a live session (whose seam-shift axis differs).
-    /// Hands the extractor exactly one segment (init + the seg containing `seconds`) and seeks
-    /// to 0: thumbnail mode returns the first frame after the seek, so 0 lands on that segment's
-    /// first keyframe whether its fMP4 tfdt is absolute or zero-based (post-restart). This makes
-    /// the decode axis-independent and correct by construction. Per-segment granularity.
-    public func vodScrubThumbnail(atSeconds seconds: Double, maxWidth: Int = 320) async -> CGImage? {
+    /// Decodes forward from the containing segment's first frame by the requested
+    /// offset. Relative frame timing handles both absolute and restarted fMP4 tfdt.
+    public func vodScrubThumbnail(
+        atSeconds seconds: Double,
+        maxWidth: Int = 320,
+        precise: Bool = true
+    ) async -> CGImage? {
         guard !isLive, let session = nativeVideoSession else { return nil }
         let gen = loadGeneration
         let source = await Task.detached(priority: .userInitiated) { [session] in
@@ -49,6 +55,15 @@ extension AetherEngine {
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             trimScrubThumbnailExtractors()
         }
+        if precise {
+            return await extractor.preciseThumbnail(
+                at: max(0, seconds - source.startSeconds),
+                maxWidth: maxWidth,
+                relativeToFirstFrame: true
+            )
+        }
+        // Fast mode returns the segment's first decoded frame and is used to get an
+        // immediate preview while a precise seek decode is still in flight.
         return await extractor.thumbnail(at: 0, maxWidth: maxWidth)
     }
 
