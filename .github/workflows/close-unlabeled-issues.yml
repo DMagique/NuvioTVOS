@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   close_unlabeled:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Close open issues with no labels
         uses: actions/github-script@v7

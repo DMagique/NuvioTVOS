@@ -34,7 +34,7 @@ env:
 jobs:
   build-and-publish:
     name: Build & update Nightly release
-    runs-on: macos-15
+    runs-on: blacksmith-12vcpu-macos-15
     timeout-minutes: 90
     steps:
       - name: Check out repository
