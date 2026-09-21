@@ -740,7 +740,15 @@ actor PlaybackStreamCacheServer {
                     // A leading "-" is a suffix range: the final N bytes (RFC 9110 §14.1.2).
                     let suffix = spec.hasPrefix("-") ? Int64(spec.dropFirst()) : nil
                     if let suffix {
-                        requestedStart = max(0, fileLength - suffix)
+                        // Clamp before subtracting: `fileLength - Int64.min` from a
+                        // malformed header (`bytes=--9223372036854775808`) would trap.
+                        if suffix <= 0 {
+                            requestedStart = fileLength
+                        } else if suffix >= fileLength {
+                            requestedStart = 0
+                        } else {
+                            requestedStart = fileLength - suffix
+                        }
                     } else if let firstStr = specs.first, let start = Int64(firstStr) {
                         requestedStart = start
                     }
